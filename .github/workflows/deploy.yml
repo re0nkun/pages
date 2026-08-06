@@ -1,8 +1,10 @@
-name: Deploy Python-generated HTML to Pages
+name: Build and Deploy to Pages
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
+  schedule:
+    - cron: "0 21 * * *"   # 毎日 UTC 21:00 = 日本時間 翌6:00
   workflow_dispatch:
 
 permissions:
@@ -26,20 +28,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      # 依存パッケージが必要な場合はここでインストール
-      # - name: Install dependencies
-      #   run: pip install -r requirements.txt
+      - name: Create output directory
+        run: mkdir -p output
 
-      - name: Generate HTML
-        run: python scripts/generate.py
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
+      - name: Run script to generate HTML
+        run: python generate.py
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: "dist"
+          path: ./output
 
   deploy:
     needs: build
