@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main" ]
   schedule:
-    - cron: "0 21 * * *"   # 毎日 UTC 21:00 = 日本時間 翌6:00
+    - cron: "0 8 * * *"   # 毎日 UTC 21:00 = 日本時間 翌6:00
   workflow_dispatch:
 
 permissions:
@@ -19,6 +19,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # ← コミットするので write に変更
+      pages: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,6 +42,15 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./output
+
+      - name: Keep repository active
+        run: |
+          date -u > .last_run
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .last_run
+          git diff --staged --quiet || git commit -m "chore: keep workflow schedule alive"
+          git push
 
   deploy:
     needs: build
