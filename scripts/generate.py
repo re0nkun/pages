@@ -222,9 +222,7 @@ def render_html(result: pd.DataFrame) -> str:
 </style>
 </head>
 <body>
-  <h1>日本株マルチファクター・スクリーナー</h1>
-  <div class="meta">最終更新: {updated_at}</div>
-  <div class="count">該当銘柄数: {len(result)}</div>
+  <div class="meta">最終更新: {updated_at} ／ 該当銘柄数: {len(result)}</div>
   {table_html}
 </body>
 </html>
