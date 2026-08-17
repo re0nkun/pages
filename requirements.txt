@@ -1,3 +1,4 @@
 tradingview-screener
 pandas
 numpy
+jinja2
