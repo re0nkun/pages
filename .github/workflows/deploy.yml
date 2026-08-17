@@ -39,7 +39,7 @@ jobs:
         run: mkdir -p output
 
       - name: Run script to generate HTML
-        run: python generate.py
+        run: python scripts/generate.py
 
       - name: Validate output
         run: |
