@@ -32,6 +32,7 @@ EXCLUDED_INDUSTRIES = {
 }
 
 COLUMN_LABELS_JA = {
+    'name': '銘柄名',
     'sector': 'セクター',
     'industry': '業種',
     'market_cap_basic': '時価総額',
@@ -46,7 +47,6 @@ COLUMN_LABELS_JA = {
     'return_on_equity': 'ROE',
     'current_ratio': '流動比率',
     'debt_to_equity': 'D/E倍率',
-    'cash_f_operating_activities_fy': '営業CF',
     'average_volume_10d_calc': '10日平均出来高',
 }
 
@@ -128,7 +128,6 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
             'return_on_equity',
             'current_ratio',
             'debt_to_equity',
-            'cash_f_operating_activities_fy',
             'price_in_range_pct',
         ]]
         .rename(columns=COLUMN_LABELS_JA)
@@ -199,6 +198,10 @@ def render_html(result: pd.DataFrame) -> str:
   table.screener-table th:first-child, table.screener-table td:first-child {{
     text-align: left;
   }}
+  table.screener-table th:nth-child(5), table.screener-table td:nth-child(5) {{
+    width: 40px;
+    text-align: center;
+  }}
   table.screener-table th {{
     background: #1a1d24;
     position: sticky;
@@ -222,6 +225,7 @@ def render_html(result: pd.DataFrame) -> str:
 </style>
 </head>
 <body>
+  <h1>日本株マルチファクター・スクリーナー</h1>
   <div class="meta">最終更新: {updated_at} ／ 該当銘柄数: {len(result)}</div>
   {table_html}
 </body>
