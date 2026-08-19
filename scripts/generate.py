@@ -120,36 +120,36 @@ def make_tv_link(name):
 
 
 def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
-    result = (
-        df[[
-            'name',
-            'fcf_yield', 'fcf_yield_threshold',
-            'ebitda_vs_assets_growth', 'asset_shrinking',
-            'return_on_equity',
-            'current_ratio',
-            'debt_to_equity',
-            'price_in_range_pct',
-        ]]
-        .rename(columns=COLUMN_LABELS_JA)
+    result = df[['name']].copy()
+
+    # FCFイールドと閾値を1カラムに統合
+    result['FCFイールド'] = df.apply(
+        lambda r: f"{r['fcf_yield']:.2%}(閾値{r['fcf_yield_threshold']:.2%})", axis=1
     )
-    return result
+
+    # EBITDA-資産成長差と資産縮小フラグを1カラムに統合
+    result['EBITDA-資産成長差'] = df.apply(
+        lambda r: f"{r['ebitda_vs_assets_growth']:.1f}" + (" ⚠️" if r['asset_shrinking'] else ""),
+        axis=1
+    )
+
+    result['ROE'] = df['return_on_equity']
+    result['流動比率'] = df['current_ratio']
+    result['D/E倍率'] = df['debt_to_equity']
+    result['52週レンジ位置'] = df['price_in_range_pct'].map(
+        lambda v: f"{v:.1f}%" if pd.notna(v) else ""
+    )
+
+    return result.rename(columns={'name': COLUMN_LABELS_JA['name']})
 
 
 def render_html(result: pd.DataFrame) -> str:
     format_dict = {
-        c: '{:,.0f}' for c in result.select_dtypes(include=np.number).columns
-        if c not in ('資産縮小フラグ', 'FCFイールド', 'FCF閾値')
-    }
-    format_dict.update({
         'D/E倍率': '{:.2f}',
         '流動比率': '{:.2f}',
-        'FCF閾値': '{:.2f}',
-        'FCFイールド': '{:.2%}',
-        'EBITDA-資産成長差': '{:.1f}',
         'ROE': '{:.1f}',
-    })
-    format_dict['資産縮小フラグ'] = lambda v: '⚠️' if v else ''
-    format_dict['name'] = make_tv_link
+        '銘柄名': make_tv_link,
+    }
 
     table_html = (
         result.style
@@ -197,10 +197,6 @@ def render_html(result: pd.DataFrame) -> str:
   }}
   table.screener-table th:first-child, table.screener-table td:first-child {{
     text-align: left;
-  }}
-  table.screener-table th:nth-child(5), table.screener-table td:nth-child(5) {{
-    width: 40px;
-    text-align: center;
   }}
   table.screener-table th {{
     background: #1a1d24;
