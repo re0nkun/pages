@@ -129,12 +129,12 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
 
     # EBITDA-資産成長差と資産縮小フラグを1カラムに統合
     result['EBITDA-資産成長差'] = df.apply(
-        lambda r: f"{r['ebitda_vs_assets_growth']:.1f}" + (" ⚠️" if r['asset_shrinking'] else ""),
+        lambda r: f"{r['ebitda_vs_assets_growth']:.1f}" + (" ⚠️(資産縮小)" if r['asset_shrinking'] else ""),
         axis=1
     )
 
-    result['ROE'] = df['return_on_equity'].map(lambda v: f"{v:.1f}(基準8.0以上)")
-    result['D/E倍率'] = df['debt_to_equity'].map(lambda v: f"{v:.2f}(基準0〜2.00)")
+    result['ROE(基準8.0以上)'] = df['return_on_equity']
+    result['D/E倍率(基準0〜2.00)'] = df['debt_to_equity']
     result['52週レンジ位置'] = df['price_in_range_pct'].map(
         lambda v: f"{v:.1f}%" if pd.notna(v) else ""
     )
@@ -145,6 +145,8 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
 def render_html(result: pd.DataFrame) -> str:
     format_dict = {
         '銘柄名': make_tv_link,
+        'ROE(基準8.0以上)': '{:.1f}',
+        'D/E倍率(基準0〜2.00)': '{:.2f}',
     }
 
     table_html = (
