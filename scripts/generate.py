@@ -116,7 +116,7 @@ def process(df: pd.DataFrame) -> pd.DataFrame:
 def make_tv_link(name):
     if pd.isna(name):
         return ""
-    return f'<a href="https://www.tradingview.com/symbols/TSE-{name}/" target="_blank">{name}</a>'
+    return f'<a href="https://jp.tradingview.com/symbols/TSE-{name}/" target="_blank">{name}</a>'
 
 
 def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
