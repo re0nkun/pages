@@ -133,9 +133,8 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
         axis=1
     )
 
-    result['ROE'] = df['return_on_equity']
-    result['流動比率'] = df['current_ratio']
-    result['D/E倍率'] = df['debt_to_equity']
+    result['ROE'] = df['return_on_equity'].map(lambda v: f"{v:.1f}(基準8.0以上)")
+    result['D/E倍率'] = df['debt_to_equity'].map(lambda v: f"{v:.2f}(基準0〜2.00)")
     result['52週レンジ位置'] = df['price_in_range_pct'].map(
         lambda v: f"{v:.1f}%" if pd.notna(v) else ""
     )
@@ -145,9 +144,6 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
 
 def render_html(result: pd.DataFrame) -> str:
     format_dict = {
-        'D/E倍率': '{:.2f}',
-        '流動比率': '{:.2f}',
-        'ROE': '{:.1f}',
         '銘柄名': make_tv_link,
     }
 
