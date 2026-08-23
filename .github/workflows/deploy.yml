@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main" ]
   schedule:
-    - cron: "0 21 * * *"   # 毎日 UTC 21:00 = 日本時間 翌6:00
+    - cron: "0 8 * * *"   # 毎日 UTC 21:00 = 日本時間 翌6:00
   workflow_dispatch:
 
 permissions:
