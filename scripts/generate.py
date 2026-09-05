@@ -52,6 +52,30 @@ COLUMN_LABELS_JA = {
 
 LOGO_BASE_URL = "https://s3-symbol-logo.tradingview.com/{logoid}.svg"
 
+SECTOR_LABELS_JA = {
+    'Commercial Services': '商業サービス',
+    'Communications': '通信',
+    'Consumer Durables': '耐久消費財',
+    'Consumer Non-Durables': '非耐久消費財',
+    'Consumer Services': '消費者サービス',
+    'Distribution Services': '流通サービス',
+    'Electronic Technology': '電子技術',
+    'Energy Minerals': 'エネルギー資源',
+    'Finance': '金融',
+    'Health Services': 'ヘルスケアサービス',
+    'Health Technology': 'ヘルスケア技術',
+    'Industrial Services': '産業サービス',
+    'Miscellaneous': 'その他',
+    'Non-Energy Minerals': '非エネルギー資源',
+    'Process Industries': 'プロセス産業',
+    'Producer Manufacturing': '生産財製造業',
+    'Retail Trade': '小売業',
+    'Technology Services': '技術サービス',
+    'Transportation': '運輸',
+    'Utilities': '公益事業',
+    'Government': '行政',
+}
+
 
 def fetch_data() -> pd.DataFrame:
     df = (Query()
@@ -142,7 +166,7 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame(index=df.index)
 
     result[COLUMN_LABELS_JA['name']] = df.apply(make_name_cell, axis=1)
-    result[COLUMN_LABELS_JA['sector']] = df['sector']
+    result[COLUMN_LABELS_JA['sector']] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
 
     # FCFイールドと閾値を1カラムに統合
     result['FCFイールド'] = df.apply(
