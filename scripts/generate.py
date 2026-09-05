@@ -254,7 +254,7 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
 
     result[COLUMN_LABELS_JA['name']] = df.apply(make_name_cell, axis=1)
     result[COLUMN_LABELS_JA['sector']] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
-    result['株価推移(12ヶ月) / 52週レンジ位置'] = df.apply(make_chart_cell, axis=1)
+    result['株価推移(52週レンジ位置)'] = df.apply(make_chart_cell, axis=1)
 
     # FCFイールドと閾値を1カラムに統合
     result['FCFイールド'] = df.apply(
