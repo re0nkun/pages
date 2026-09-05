@@ -83,6 +83,7 @@ def fetch_data() -> pd.DataFrame:
                 'free_cash_flow_fy',
                 'total_assets_yoy_growth_fy', 'ebitda_yoy_growth_fy',
                 'close', 'price_52_week_high', 'price_52_week_low',
+                'Perf.W', 'Perf.1M', 'Perf.3M', 'Perf.6M',
                 'debt_to_equity',
                 'return_on_equity',
                 'net_income_fy',
@@ -140,12 +141,90 @@ def process(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_values('fcf_yield', ascending=False)
 
 
+def make_range_bar(pct):
+    """52週レンジ内の現在値の位置を横バーで可視化する簡易チャート。"""
+    if pd.isna(pct):
+        return ""
+    pct = max(0.0, min(100.0, float(pct)))
+    # 低位=赤寄り、高位=緑寄りのマーカー色
+    if pct >= 70:
+        color = "#5fbf6a"
+    elif pct <= 30:
+        color = "#e0605a"
+    else:
+        color = "#d8c25a"
+    return (
+        f'<span class="range-bar" title="{pct:.1f}%">'
+        f'<span class="range-bar-track">'
+        f'<span class="range-bar-marker" style="left:{pct:.1f}%; background:{color};"></span>'
+        f'</span>'
+        f'<span class="range-bar-label">{pct:.0f}%</span>'
+        f'</span>'
+    )
+
+
 def make_logo_tag(logoid):
     """logoidからロゴ<img>タグを生成。logoidが無い場合は空文字（余白確保用のスペーサーは付けない）。"""
     if pd.isna(logoid) or not logoid:
         return ""
     url = LOGO_BASE_URL.format(logoid=logoid)
     return f'<img src="{url}" class="logo-icon" alt="" loading="lazy">'
+
+
+def make_sparkline_svg(row, width=64, height=22):
+    """
+    Perf.6M / Perf.3M / Perf.1M / Perf.W (パフォーマンス%) から
+    現在値を基準に過去の相対株価を逆算し、簡易スパークラインを描画する。
+    ※ 日次データではなく5点(6ヶ月前・3ヶ月前・1ヶ月前・1週間前・現在)の近似トレンド。
+    """
+    close = row.get('close')
+    perf_keys = ['Perf.6M', 'Perf.3M', 'Perf.1M', 'Perf.W']
+
+    if pd.isna(close):
+        return ""
+
+    points = []
+    for k in perf_keys:
+        perf = row.get(k)
+        if pd.isna(perf):
+            points.append(None)
+        else:
+            points.append(close / (1 + perf / 100))
+    points.append(close)
+
+    valid = [p for p in points if p is not None]
+    if len(valid) < 2:
+        return ""
+
+    # 欠損値は前後の値で単純補間（先頭欠損は最初の有効値で埋める）
+    filled = []
+    last_valid = None
+    for p in points:
+        if p is not None:
+            last_valid = p
+        filled.append(last_valid if last_valid is not None else next(v for v in points if v is not None))
+
+    lo, hi = min(filled), max(filled)
+    span = hi - lo if hi != lo else 1
+    n = len(filled)
+    step = width / (n - 1)
+
+    coords = [
+        (round(i * step, 1), round(height - 2 - (v - lo) / span * (height - 4), 1))
+        for i, v in enumerate(filled)
+    ]
+    path = " ".join(f"{x},{y}" for x, y in coords)
+
+    trend_up = filled[-1] >= filled[0]
+    color = "#4caf7d" if trend_up else "#e5534b"
+
+    return (
+        f'<svg class="sparkline" viewBox="0 0 {width} {height}" '
+        f'preserveAspectRatio="none">'
+        f'<polyline points="{path}" fill="none" stroke="{color}" '
+        f'stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>'
+        f'</svg>'
+    )
 
 
 def make_name_cell(row):
@@ -167,6 +246,7 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
 
     result[COLUMN_LABELS_JA['name']] = df.apply(make_name_cell, axis=1)
     result[COLUMN_LABELS_JA['sector']] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
+    result['株価推移(6ヶ月)'] = df.apply(make_sparkline_svg, axis=1)
 
     # FCFイールドと閾値を1カラムに統合
     result['FCFイールド'] = df.apply(
@@ -181,9 +261,7 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
 
     result['ROE(基準8.0以上)'] = df['return_on_equity']
     result['D/E倍率(基準0〜2.00)'] = df['debt_to_equity']
-    result['52週レンジ位置'] = df['price_in_range_pct'].map(
-        lambda v: f"{v:.1f}%" if pd.notna(v) else ""
-    )
+    result['52週レンジ位置'] = df['price_in_range_pct'].map(make_range_bar)
 
     return result
 
@@ -278,6 +356,43 @@ def render_html(result: pd.DataFrame) -> str:
     border-radius: 3px;
     flex-shrink: 0;
     background: #fff;
+  }}
+  .sparkline {{
+    display: block;
+    width: 64px;
+    height: 22px;
+  }}
+  table.screener-table td:has(.sparkline) {{
+    text-align: center;
+  }}
+  .range-bar {{
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+  }}
+  .range-bar-track {{
+    position: relative;
+    display: inline-block;
+    width: 70px;
+    height: 6px;
+    background: #2a2e38;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }}
+  .range-bar-marker {{
+    position: absolute;
+    top: 50%;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+  }}
+  .range-bar-label {{
+    color: #999;
+    font-size: 0.8rem;
+    min-width: 2.5em;
+    text-align: right;
   }}
   .count {{
     margin-bottom: 12px;
