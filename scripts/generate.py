@@ -50,10 +50,13 @@ COLUMN_LABELS_JA = {
     'average_volume_10d_calc': '10日平均出来高',
 }
 
+LOGO_BASE_URL = "https://s3-symbol-logo.tradingview.com/{logoid}.svg"
+
 
 def fetch_data() -> pd.DataFrame:
     df = (Query()
-        .select('name', 'sector', 'industry', 'market_cap_basic', 'free_cash_flow_fy',
+        .select('name', 'description', 'logoid', 'sector', 'industry', 'market_cap_basic',
+                'free_cash_flow_fy',
                 'total_assets_yoy_growth_fy', 'ebitda_yoy_growth_fy',
                 'close', 'price_52_week_high', 'price_52_week_low',
                 'debt_to_equity',
@@ -113,14 +116,29 @@ def process(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_values('fcf_yield', ascending=False)
 
 
-def make_tv_link(name):
+def make_logo_tag(logoid):
+    """logoidからロゴ<img>タグを生成。logoidが無い場合は空文字（余白確保用のスペーサーは付けない）。"""
+    if pd.isna(logoid) or not logoid:
+        return ""
+    url = LOGO_BASE_URL.format(logoid=logoid)
+    return f'<img src="{url}" class="logo-icon" alt="" loading="lazy">'
+
+
+def make_name_cell(row):
+    """ロゴ + 会社名(ティッカーへのリンク)を1セルにまとめる。"""
+    name = row['name']
     if pd.isna(name):
         return ""
-    return f'<a href="https://jp.tradingview.com/symbols/TSE-{name}/" target="_blank">{name}</a>'
+    label = row['description'] if pd.notna(row.get('description')) and row['description'] else name
+    logo_tag = make_logo_tag(row.get('logoid'))
+    link = f'<a href="https://jp.tradingview.com/symbols/TSE-{name}/" target="_blank">{label}</a>'
+    return f'<span class="name-cell">{logo_tag}{link}</span>'
 
 
 def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
-    result = df[['name']].copy()
+    result = pd.DataFrame(index=df.index)
+
+    result[COLUMN_LABELS_JA['name']] = df.apply(make_name_cell, axis=1)
 
     # FCFイールドと閾値を1カラムに統合
     result['FCFイールド'] = df.apply(
@@ -139,12 +157,11 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
         lambda v: f"{v:.1f}%" if pd.notna(v) else ""
     )
 
-    return result.rename(columns={'name': COLUMN_LABELS_JA['name']})
+    return result
 
 
 def render_html(result: pd.DataFrame) -> str:
     format_dict = {
-        '銘柄名': make_tv_link,
         'ROE(基準8.0以上)': '{:.1f}',
         'D/E倍率(基準0〜2.00)': '{:.2f}',
     }
@@ -210,6 +227,19 @@ def render_html(result: pd.DataFrame) -> str:
   }}
   table.screener-table a:hover {{
     text-decoration: underline;
+  }}
+  .name-cell {{
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }}
+  .logo-icon {{
+    width: 18px;
+    height: 18px;
+    object-fit: contain;
+    border-radius: 3px;
+    flex-shrink: 0;
+    background: #fff;
   }}
   .count {{
     margin-bottom: 12px;
