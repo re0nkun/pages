@@ -131,7 +131,10 @@ def make_name_cell(row):
         return ""
     label = row['description'] if pd.notna(row.get('description')) and row['description'] else name
     logo_tag = make_logo_tag(row.get('logoid'))
-    link = f'<a href="https://jp.tradingview.com/symbols/TSE-{name}/" target="_blank">{label}</a>'
+    link = (
+        f'<a href="https://jp.tradingview.com/symbols/TSE-{name}/" '
+        f'target="_blank" title="{label}">{label}</a>'
+    )
     return f'<span class="name-cell">{logo_tag}{link}</span>'
 
 
@@ -139,6 +142,7 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame(index=df.index)
 
     result[COLUMN_LABELS_JA['name']] = df.apply(make_name_cell, axis=1)
+    result[COLUMN_LABELS_JA['sector']] = df['sector']
 
     # FCFイールドと閾値を1カラムに統合
     result['FCFイールド'] = df.apply(
@@ -212,6 +216,9 @@ def render_html(result: pd.DataFrame) -> str:
   }}
   table.screener-table th:first-child, table.screener-table td:first-child {{
     text-align: left;
+    width: 140px;
+    max-width: 140px;
+    overflow: hidden;
   }}
   table.screener-table th {{
     background: #1a1d24;
@@ -232,6 +239,13 @@ def render_html(result: pd.DataFrame) -> str:
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    max-width: 100%;
+  }}
+  .name-cell a {{
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   }}
   .logo-icon {{
     width: 18px;
