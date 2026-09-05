@@ -93,6 +93,7 @@ def fetch_data() -> pd.DataFrame:
                 'total_revenue_yoy_growth_fy',
                 'price_book_ratio',
         )
+        .set_property('options', {'lang': 'ja'})
         .where(
             col('is_primary') == True,
             col('typespecs').has('common'),
