@@ -83,7 +83,7 @@ def fetch_data() -> pd.DataFrame:
                 'free_cash_flow_fy',
                 'total_assets_yoy_growth_fy', 'ebitda_yoy_growth_fy',
                 'close', 'price_52_week_high', 'price_52_week_low',
-                'Perf.W', 'Perf.1M', 'Perf.3M', 'Perf.6M',
+                'Perf.W', 'Perf.1M', 'Perf.3M', 'Perf.6M', 'Perf.Y',
                 'debt_to_equity',
                 'return_on_equity',
                 'net_income_fy',
@@ -173,12 +173,12 @@ def make_logo_tag(logoid):
 
 def make_sparkline_svg(row, width=64, height=22):
     """
-    Perf.6M / Perf.3M / Perf.1M / Perf.W (パフォーマンス%) から
+    Perf.Y / Perf.6M / Perf.3M / Perf.1M / Perf.W (パフォーマンス%) から
     現在値を基準に過去の相対株価を逆算し、簡易スパークラインを描画する。
-    ※ 日次データではなく5点(6ヶ月前・3ヶ月前・1ヶ月前・1週間前・現在)の近似トレンド。
+    ※ 日次データではなく6点(1年前・6ヶ月前・3ヶ月前・1ヶ月前・1週間前・現在)の近似トレンド。
     """
     close = row.get('close')
-    perf_keys = ['Perf.6M', 'Perf.3M', 'Perf.1M', 'Perf.W']
+    perf_keys = ['Perf.Y', 'Perf.6M', 'Perf.3M', 'Perf.1M', 'Perf.W']
 
     if pd.isna(close):
         return ""
@@ -227,6 +227,11 @@ def make_sparkline_svg(row, width=64, height=22):
     )
 
 
+def make_chart_cell(row):
+    """スパークラインを表示するセル。"""
+    return make_sparkline_svg(row)
+
+
 def make_name_cell(row):
     """ロゴ + 会社名(ティッカーへのリンク)を1セルにまとめる。"""
     name = row['name']
@@ -246,7 +251,7 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
 
     result[COLUMN_LABELS_JA['name']] = df.apply(make_name_cell, axis=1)
     result[COLUMN_LABELS_JA['sector']] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
-    result['株価推移(6ヶ月)'] = df.apply(make_sparkline_svg, axis=1)
+    result['株価推移(12ヶ月)'] = df.apply(make_chart_cell, axis=1)
 
     # FCFイールドと閾値を1カラムに統合
     result['FCFイールド'] = df.apply(
@@ -261,7 +266,6 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
 
     result['ROE(基準8.0以上)'] = df['return_on_equity']
     result['D/E倍率(基準0〜2.00)'] = df['debt_to_equity']
-    result['52週レンジ位置'] = df['price_in_range_pct'].map(make_range_bar)
 
     return result
 
@@ -361,6 +365,7 @@ def render_html(result: pd.DataFrame) -> str:
     display: block;
     width: 64px;
     height: 22px;
+    margin: 0 auto;
   }}
   table.screener-table td:has(.sparkline) {{
     text-align: center;
