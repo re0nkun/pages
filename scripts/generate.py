@@ -228,8 +228,11 @@ def make_sparkline_svg(row, width=64, height=22):
 
 
 def make_chart_cell(row):
-    """スパークラインを表示するセル。"""
-    return make_sparkline_svg(row)
+    """スパークラインと52週レンジ位置(%)を1セルにまとめる。"""
+    spark = make_sparkline_svg(row)
+    pct = row.get('price_in_range_pct')
+    pct_label = f'<span class="range-pct">({pct:.1f}%)</span>' if pd.notna(pct) else ""
+    return f'<div class="chart-cell">{spark}{pct_label}</div>'
 
 
 def make_name_cell(row):
@@ -251,7 +254,7 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
 
     result[COLUMN_LABELS_JA['name']] = df.apply(make_name_cell, axis=1)
     result[COLUMN_LABELS_JA['sector']] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
-    result['株価推移(12ヶ月)'] = df.apply(make_chart_cell, axis=1)
+    result['株価推移(12ヶ月) / 52週レンジ位置'] = df.apply(make_chart_cell, axis=1)
 
     # FCFイールドと閾値を1カラムに統合
     result['FCFイールド'] = df.apply(
@@ -367,8 +370,22 @@ def render_html(result: pd.DataFrame) -> str:
     height: 22px;
     margin: 0 auto;
   }}
-  table.screener-table td:has(.sparkline) {{
+  .chart-cell {{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+  }}
+  table.screener-table td:has(.chart-cell) {{
     text-align: center;
+  }}
+  .chart-cell .range-bar {{
+    width: auto;
+  }}
+  .range-pct {{
+    color: #999;
+    font-size: 0.75rem;
   }}
   .range-bar {{
     display: inline-flex;
