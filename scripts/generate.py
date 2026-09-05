@@ -371,11 +371,10 @@ def render_html(result: pd.DataFrame) -> str:
     margin: 0 auto;
   }}
   .chart-cell {{
-    display: flex;
-    flex-direction: column;
+    display: inline-flex;
+    flex-direction: row;
     align-items: center;
-    gap: 4px;
-    width: 100%;
+    gap: 6px;
   }}
   table.screener-table td:has(.chart-cell) {{
     text-align: center;
