@@ -2,18 +2,46 @@
 日本株マルチファクター・スクリーナー
 TradingView Query API からデータを取得し、フィルタリング結果を
 output/index.html として書き出す。GitHub Actions から日次実行される想定。
+
+- 通過銘柄を snapshots/YYYYMMDD.csv に保存し、前日との差分(脱落・新規)を HTML に表示
+- 脱落銘柄は、どの条件を割ったか・時価総額の変化・直近決算日を併記
+- 極端値(EBITDA成長・FCFイールド・ROE)は除外せず ⚠️ フラグで表示
 """
 
+import glob
+import os
 import sys
 import traceback
 from datetime import datetime, timezone, timedelta
+from html import escape
 
 import numpy as np
 import pandas as pd
 from tradingview_screener import Query, col
 
 OUTPUT_PATH = "output/index.html"
+SNAP_DIR = "snapshots"
 JST = timezone(timedelta(hours=9))
+
+# ---------------------------------------------------------------
+# スクリーニング条件(fetch_data / process / explain_dropped で共通)
+# ---------------------------------------------------------------
+MARKET_CAP_MIN = 1e10        # 100億円
+MARKET_CAP_MAX = 3e11        # 3000億円
+MIN_AVG_VALUE_10D = 2e7      # 10日平均売買代金 2000万円(仮置き)
+MIN_EBITDA_GROWTH = 5
+MIN_REVENUE_GROWTH = 3
+MIN_ASSET_GROWTH = -5
+MIN_ROE = 8
+DE_MIN, DE_MAX = 0, 2.0
+MIN_CURRENT_RATIO = 1.2
+FCF_THRESHOLD_MULT = 1.2
+
+# 極端値フラグ(除外ではなく表示のみ。閾値は仮置き)
+OUTLIER_EBITDA_GROWTH = 100  # %
+OUTLIER_FCF_YIELD = 0.20     # 比率(20%)
+OUTLIER_ROE = 40             # %
+GROWTH_GAP_CLIP = 100        # EBITDA-資産成長差の表示上限
 
 SECTOR_FCF_YIELD = {s: t for t, ss in [
     (0.03, ['Electronic Technology', 'Technology Services', 'Health Technology']),
@@ -34,20 +62,6 @@ EXCLUDED_INDUSTRIES = {
 COLUMN_LABELS_JA = {
     'name': '銘柄名',
     'sector': 'セクター',
-    'industry': '業種',
-    'market_cap_basic': '時価総額',
-    'fcf_yield': 'FCFイールド',
-    'fcf_yield_threshold': 'FCF閾値',
-    'price_book_ratio': 'PBR',
-    'price_in_range_pct': '52週レンジ位置(%)',
-    'ebitda_yoy_growth_fy': 'EBITDA成長率(前年比)',
-    'total_revenue_yoy_growth_fy': '売上高成長率(前年比)',
-    'ebitda_vs_assets_growth': 'EBITDA-資産成長差',
-    'asset_shrinking': '資産縮小フラグ',
-    'return_on_equity': 'ROE',
-    'current_ratio': '流動比率',
-    'debt_to_equity': 'D/E倍率',
-    'average_volume_10d_calc': '10日平均出来高',
 }
 
 LOGO_BASE_URL = "https://s3-symbol-logo.tradingview.com/{logoid}.svg"
@@ -77,6 +91,9 @@ SECTOR_LABELS_JA = {
 }
 
 
+# ---------------------------------------------------------------
+# データ取得・加工
+# ---------------------------------------------------------------
 def fetch_data() -> pd.DataFrame:
     df = (Query()
         .select('name', 'description', 'logoid', 'sector', 'industry', 'market_cap_basic',
@@ -99,18 +116,18 @@ def fetch_data() -> pd.DataFrame:
             col('typespecs').has('common'),
             col('type') == 'stock',
             col('exchange') == 'TSE',
-            col('market_cap_basic').between(1e9, 2e10),
+            col('market_cap_basic').between(MARKET_CAP_MIN, MARKET_CAP_MAX),
             col('free_cash_flow_fy') > 0,
             col('cash_f_operating_activities_fy') > 0,
-            col('ebitda_yoy_growth_fy') >= 5,
-            col('total_revenue_yoy_growth_fy') >= 3,
-            col('total_assets_yoy_growth_fy') >= -5,
+            col('ebitda_yoy_growth_fy') >= MIN_EBITDA_GROWTH,
+            col('total_revenue_yoy_growth_fy') >= MIN_REVENUE_GROWTH,
+            col('total_assets_yoy_growth_fy') >= MIN_ASSET_GROWTH,
             col('total_assets_yoy_growth_fy') <= col('ebitda_yoy_growth_fy'),
             col('net_income_fy') > 0,
-            col('return_on_equity') >= 8,
-            col('debt_to_equity').between(0, 2.0),
-            col('current_ratio') >= 1.2,
-            col('average_volume_10d_calc') >= 50000,
+            col('return_on_equity') >= MIN_ROE,
+            col('debt_to_equity').between(DE_MIN, DE_MAX),
+            col('current_ratio') >= MIN_CURRENT_RATIO,
+            # 出来高(株数)ではなく売買代金で絞るため、ここでは出来高条件を付けない
         )
         .limit(3000)
         .set_markets('japan')
@@ -120,6 +137,10 @@ def fetch_data() -> pd.DataFrame:
 
 def process(df: pd.DataFrame) -> pd.DataFrame:
     df = df[~df['industry'].isin(EXCLUDED_INDUSTRIES)].copy()
+
+    # 流動性: 10日平均売買代金
+    df['avg_value_10d'] = df['average_volume_10d_calc'] * df['close']
+    df = df[df['avg_value_10d'] >= MIN_AVG_VALUE_10D].copy()
 
     # FCFイールド
     df['fcf_yield'] = df['free_cash_flow_fy'] / df['market_cap_basic']
@@ -131,17 +152,134 @@ def process(df: pd.DataFrame) -> pd.DataFrame:
         (df['close'] - df['price_52_week_low']) / week52_range.replace(0, np.nan) * 100
     ).clip(0, 100).round(1)
 
-    # 成長の質
+    # 成長の質(表示用にクリップ。元の値は _raw に残す)
     asset_growth = df['total_assets_yoy_growth_fy']
-    df['ebitda_vs_assets_growth'] = (df['ebitda_yoy_growth_fy'] - asset_growth).round(2)
+    df['ebitda_vs_assets_growth_raw'] = (df['ebitda_yoy_growth_fy'] - asset_growth).round(2)
+    df['ebitda_vs_assets_growth'] = df['ebitda_vs_assets_growth_raw'].clip(upper=GROWTH_GAP_CLIP)
     df['asset_shrinking'] = asset_growth < 0
 
-    # フィルタリング
-    df = df[df['fcf_yield'] >= df['fcf_yield_threshold'] * 1.2]
+    # FCFイールドの閾値フィルタ
+    df = df[df['fcf_yield'] >= df['fcf_yield_threshold'] * FCF_THRESHOLD_MULT].copy()
+
+    # 極端値フラグ(除外せず表示)
+    df['outlier_flag'] = (
+        (df['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH)
+        | (df['fcf_yield'] > OUTLIER_FCF_YIELD)
+        | (df['return_on_equity'] > OUTLIER_ROE)
+    )
 
     return df.sort_values('fcf_yield', ascending=False)
 
 
+# ---------------------------------------------------------------
+# 前日比較(スナップショット保存・脱落理由の特定)
+# ---------------------------------------------------------------
+def save_and_diff(df: pd.DataFrame):
+    """今日の結果をCSV保存し、直近の前日分との差分(脱落, 新規)を返す。前日分が無ければ (None, None)。"""
+    os.makedirs(SNAP_DIR, exist_ok=True)
+    today_path = f"{SNAP_DIR}/{datetime.now(JST):%Y%m%d}.csv"
+    prev_files = sorted(f for f in glob.glob(f"{SNAP_DIR}/*.csv") if f != today_path)
+
+    cols = ['name', 'description', 'sector', 'fcf_yield', 'market_cap_basic',
+            'ebitda_yoy_growth_fy', 'return_on_equity', 'debt_to_equity', 'outlier_flag']
+    snap = df[cols].copy()
+    snap.insert(0, 'rank', range(1, len(snap) + 1))
+    snap.to_csv(today_path, index=False)
+
+    if not prev_files:
+        return None, None
+
+    prev = pd.read_csv(prev_files[-1], dtype={'name': str})
+    today_names = set(df['name'].astype(str))
+    prev_names = set(prev['name'])
+    dropped = prev[~prev['name'].isin(today_names)].copy()
+    added = df[~df['name'].astype(str).isin(prev_names)].copy()
+    return dropped, added
+
+
+def explain_dropped(dropped: pd.DataFrame) -> pd.DataFrame:
+    """脱落銘柄をフィルタ無しで再取得し、割った条件・時価総額変化・直近決算日を付ける。"""
+    if dropped is None or dropped.empty:
+        return dropped
+
+    names = dropped['name'].tolist()
+    try:
+        d = (Query()
+             .select('name', 'sector', 'industry', 'market_cap_basic', 'close',
+                     'free_cash_flow_fy', 'cash_f_operating_activities_fy',
+                     'ebitda_yoy_growth_fy', 'total_revenue_yoy_growth_fy',
+                     'total_assets_yoy_growth_fy', 'net_income_fy', 'return_on_equity',
+                     'debt_to_equity', 'current_ratio', 'average_volume_10d_calc',
+                     'earnings_release_date')
+             .where(col('name').isin(names), col('exchange') == 'TSE',
+                    col('is_primary') == True)
+             .limit(len(names) + 50)
+             .set_markets('japan')
+             .get_scanner_data())[1]
+    except Exception:
+        traceback.print_exc()
+        dropped['脱落理由'] = '理由の取得に失敗'
+        return dropped
+
+    if d.empty:
+        dropped['脱落理由'] = '取得不可(データなし)'
+        dropped['直近決算日'] = ''
+        dropped['時価総額変化'] = ''
+        return dropped
+
+    d = d.drop_duplicates('name').set_index('name')
+    fcf_yield = d['free_cash_flow_fy'] / d['market_cap_basic']
+    fcf_thr = d['sector'].map(SECTOR_FCF_YIELD).fillna(0.04)
+    avg_value = d['average_volume_10d_calc'] * d['close']
+
+    # NaN は比較が False になり、~ で「条件割れ」扱い(=データ欠損も理由に出る)
+    checks = {
+        '時価総額範囲外': ~d['market_cap_basic'].between(MARKET_CAP_MIN, MARKET_CAP_MAX),
+        'FCF<=0': ~(d['free_cash_flow_fy'] > 0),
+        '営業CF<=0': ~(d['cash_f_operating_activities_fy'] > 0),
+        f'EBITDA成長<{MIN_EBITDA_GROWTH}': ~(d['ebitda_yoy_growth_fy'] >= MIN_EBITDA_GROWTH),
+        f'売上成長<{MIN_REVENUE_GROWTH}': ~(d['total_revenue_yoy_growth_fy'] >= MIN_REVENUE_GROWTH),
+        f'資産成長<{MIN_ASSET_GROWTH}': ~(d['total_assets_yoy_growth_fy'] >= MIN_ASSET_GROWTH),
+        '資産成長>EBITDA成長': ~(d['total_assets_yoy_growth_fy'] <= d['ebitda_yoy_growth_fy']),
+        '純利益<=0': ~(d['net_income_fy'] > 0),
+        f'ROE<{MIN_ROE}': ~(d['return_on_equity'] >= MIN_ROE),
+        'D/E範囲外': ~d['debt_to_equity'].between(DE_MIN, DE_MAX),
+        f'流動比率<{MIN_CURRENT_RATIO}': ~(d['current_ratio'] >= MIN_CURRENT_RATIO),
+        '売買代金不足': ~(avg_value >= MIN_AVG_VALUE_10D),
+        '除外業種': d['industry'].isin(EXCLUDED_INDUSTRIES),
+        'FCFイールド閾値割れ': ~(fcf_yield >= fcf_thr * FCF_THRESHOLD_MULT),
+    }
+    reasons = {
+        n: ', '.join(k for k, v in checks.items() if v.loc[n])
+           or '全条件OK(一時的なデータ欠損の可能性)'
+        for n in d.index
+    }
+    dropped['脱落理由'] = dropped['name'].map(reasons).fillna('取得不可(データなし)')
+
+    # 直近決算日(秒単位のUNIXタイムスタンプ)
+    dates = (pd.to_datetime(d['earnings_release_date'], unit='s', utc=True)
+             .dt.tz_convert('Asia/Tokyo').dt.strftime('%Y-%m-%d'))
+    dropped['直近決算日'] = dropped['name'].map(dates).fillna('')
+
+    # 時価総額の前日比
+    change = dropped['name'].map(d['market_cap_basic']) / dropped['market_cap_basic'] - 1
+    dropped['時価総額変化'] = change.map(lambda v: f"{v:+.1%}" if pd.notna(v) else "")
+    return dropped
+
+
+def diff_with_previous(df: pd.DataFrame):
+    """差分機能の失敗でメインページが壊れないよう、例外はここで握る。"""
+    try:
+        dropped, added = save_and_diff(df)
+        return explain_dropped(dropped), added
+    except Exception:
+        traceback.print_exc()
+        return None, None
+
+
+# ---------------------------------------------------------------
+# HTML部品
+# ---------------------------------------------------------------
 def make_range_bar(pct):
     """52週レンジ内の現在値の位置を横バーで可視化する簡易チャート。"""
     if pd.isna(pct):
@@ -165,7 +303,7 @@ def make_range_bar(pct):
 
 
 def make_logo_tag(logoid):
-    """logoidからロゴ<img>タグを生成。logoidが無い場合は空文字（余白確保用のスペーサーは付けない）。"""
+    """logoidからロゴ<img>タグを生成。logoidが無い場合は空文字。"""
     if pd.isna(logoid) or not logoid:
         return ""
     url = LOGO_BASE_URL.format(logoid=logoid)
@@ -245,7 +383,7 @@ def make_name_cell(row):
     logo_tag = make_logo_tag(row.get('logoid'))
     link = (
         f'<a href="https://jp.tradingview.com/symbols/TSE-{name}/" '
-        f'target="_blank" title="{label}">{label}</a>'
+        f'target="_blank" title="{escape(str(label))}">{escape(str(label))}</a>'
     )
     return f'<span class="name-cell">{logo_tag}{link}</span>'
 
@@ -254,6 +392,7 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame(index=df.index)
 
     result[COLUMN_LABELS_JA['name']] = df.apply(make_name_cell, axis=1)
+    result['⚠️'] = df['outlier_flag'].map({True: '⚠️', False: ''})
     result[COLUMN_LABELS_JA['sector']] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
     result['株価推移(52週レンジ位置)'] = df.apply(make_chart_cell, axis=1)
 
@@ -262,11 +401,18 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: f"{r['fcf_yield']:.2%}(閾値{r['fcf_yield_threshold']:.2%})", axis=1
     )
 
-    # EBITDA-資産成長差と資産縮小フラグを1カラムに統合
-    result['EBITDA-資産成長差'] = df.apply(
-        lambda r: f"{r['ebitda_vs_assets_growth']:.1f}" + (" ⚠️(資産縮小)" if r['asset_shrinking'] else ""),
-        axis=1
-    )
+    result['EBITDA成長率(%)'] = df['ebitda_yoy_growth_fy']
+
+    # EBITDA-資産成長差(上限クリップ時は + を付ける)と資産縮小フラグを1カラムに統合
+    def gap_label(r):
+        text = f"{r['ebitda_vs_assets_growth']:.1f}"
+        if r['ebitda_vs_assets_growth_raw'] > GROWTH_GAP_CLIP:
+            text += "+"
+        if r['asset_shrinking']:
+            text += " ⚠️(資産縮小)"
+        return text
+
+    result['EBITDA-資産成長差'] = df.apply(gap_label, axis=1)
 
     result['ROE(基準8.0以上)'] = df['return_on_equity']
     result['D/E倍率(基準0〜2.00)'] = df['debt_to_equity']
@@ -274,8 +420,32 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def render_html(result: pd.DataFrame) -> str:
+def build_diff_html(df, title, yield_label, with_reason=False) -> str:
+    if df is None:
+        return (f'<h2>{title}</h2>'
+                f'<div class="count">前日のスナップショットがありません(初回、または取得失敗)</div>')
+    if df.empty:
+        return f'<h2>{title}</h2><div class="count">なし</div>'
+
+    t = pd.DataFrame(index=df.index)
+    t['銘柄名'] = df.apply(make_name_cell, axis=1)
+    t['セクター'] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
+    t[yield_label] = df['fcf_yield'].map(lambda v: f"{v:.2%}" if pd.notna(v) else "")
+    if with_reason:
+        for c in ['時価総額変化', '直近決算日']:
+            if c in df.columns:
+                t[c] = df[c]
+        t['脱落理由'] = df['脱落理由'].map(lambda s: escape(str(s)))
+
+    table = (t.style.hide(axis="index")
+             .set_table_attributes('class="screener-table"')
+             .to_html(escape=False))
+    return f'<h2>{title}({len(df)}件)</h2>{table}'
+
+
+def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     format_dict = {
+        'EBITDA成長率(%)': '{:.1f}',
         'ROE(基準8.0以上)': '{:.1f}',
         'D/E倍率(基準0〜2.00)': '{:.2f}',
     }
@@ -288,7 +458,19 @@ def render_html(result: pd.DataFrame) -> str:
         .to_html(escape=False)
     )
 
+    diff_html = (
+        build_diff_html(dropped, '本日の脱落銘柄(前日比)', '前日FCFイールド', with_reason=True)
+        + build_diff_html(added, '本日の新規銘柄(前日比)', 'FCFイールド')
+    )
+
     updated_at = datetime.now(JST).strftime('%Y-%m-%d %H:%M JST')
+    cap_min = MARKET_CAP_MIN / 1e8
+    cap_max = MARKET_CAP_MAX / 1e8
+    legend = (
+        f"時価総額 {cap_min:,.0f}〜{cap_max:,.0f}億円 ／ "
+        f"⚠️ = EBITDA成長&gt;{OUTLIER_EBITDA_GROWTH}% または FCFイールド&gt;{OUTLIER_FCF_YIELD:.0%} "
+        f"または ROE&gt;{OUTLIER_ROE}%(一時要因の可能性)"
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -308,10 +490,14 @@ def render_html(result: pd.DataFrame) -> str:
     font-size: 1.4rem;
     margin-bottom: 4px;
   }}
+  h2 {{
+    font-size: 1.1rem;
+    margin: 32px 0 8px;
+  }}
   .meta {{
     color: #999;
     font-size: 0.85rem;
-    margin-bottom: 20px;
+    margin-bottom: 8px;
   }}
   table.screener-table {{
     border-collapse: collapse;
@@ -425,7 +611,9 @@ def render_html(result: pd.DataFrame) -> str:
 </head>
 <body>
   <div class="meta">最終更新: {updated_at} ／ 該当銘柄数: {len(result)}</div>
+  <div class="count">{legend}</div>
   {table_html}
+  {diff_html}
 </body>
 </html>
 """
@@ -446,18 +634,20 @@ def render_error_html(message: str) -> str:
 <body>
   <h1>データ取得または処理でエラーが発生しました</h1>
   <div>最終試行: {updated_at}</div>
-  <pre>{message}</pre>
+  <pre>{escape(message)}</pre>
 </body>
 </html>
 """
 
 
 def main():
+    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     try:
         raw = fetch_data()
         df = process(raw)
+        dropped, added = diff_with_previous(df)
         result = build_result_table(df)
-        html = render_html(result)
+        html = render_html(result, dropped, added)
     except Exception:
         # 失敗してもページは必ず生成し、原因が分かるようにする
         html = render_error_html(traceback.format_exc())
