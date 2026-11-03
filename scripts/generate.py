@@ -5,6 +5,7 @@ output/index.html として書き出す。GitHub Actions から日次実行さ�
 
 - 通過銘柄を snapshots/YYYYMMDD.csv に保存し、前日との差分(脱落・新規)を HTML に表示
 - 脱落銘柄は、どの条件を割ったか・時価総額の変化・直近決算日を併記
+- 一時要因の疑いが強い銘柄は足切り(EBITDA成長の分母効果 / FCF急増×投資小 / ROE高×純利益>EBITDA)
 - 極端値(EBITDA成長・FCFイールド・ROE)は除外せず ⚠️ フラグで表示
 """
 
@@ -32,9 +33,9 @@ MIN_AVG_VALUE_10D = 2e7      # 10日平均売買代金 2000万円(仮置き)
 MIN_EBITDA_GROWTH = 5
 MIN_REVENUE_GROWTH = 3
 MIN_ASSET_GROWTH = -5
-MIN_ROE = 8
-DE_MIN, DE_MAX = 0, 2.0
-MIN_CURRENT_RATIO = 1.2
+MIN_ROE = 8                  # return_on_equity は TTM(四半期ごとに更新される)
+DE_MIN, DE_MAX = 0, 2.0      # debt_to_equity は MRQ
+MIN_CURRENT_RATIO = 1.2      # current_ratio は MRQ
 FCF_THRESHOLD_MULT = 1.2
 
 # 極端値フラグ(除外ではなく表示のみ。閾値は仮置き)
@@ -42,6 +43,11 @@ OUTLIER_EBITDA_GROWTH = 100  # %
 OUTLIER_FCF_YIELD = 0.20     # 比率(20%)
 OUTLIER_ROE = 40             # %
 GROWTH_GAP_CLIP = 100        # EBITDA-資産成長差の表示上限
+
+# 足切り(一時要因の疑いが強い組み合わせのみ除外。閾値は仮置き)
+MIN_PREV_EBITDA_TO_CAP = 0.01   # 前年EBITDAが時価総額の1%未満なら「分母が小さい」
+SUSPECT_FCF_GROWTH = 100        # FCFが前年比で2倍超
+SUSPECT_INVEST_TO_OCF = 0.2     # 投資CFの支出が営業CFの2割未満(支出=マイナス前提)
 
 SECTOR_FCF_YIELD = {s: t for t, ss in [
     (0.03, ['Electronic Technology', 'Technology Services', 'Health Technology']),
@@ -63,8 +69,6 @@ COLUMN_LABELS_JA = {
     'name': '銘柄名',
     'sector': 'セクター',
 }
-
-LOGO_BASE_URL = "https://s3-symbol-logo.tradingview.com/{logoid}.svg"
 
 SECTOR_LABELS_JA = {
     'Commercial Services': '商業サービス',
@@ -96,7 +100,7 @@ SECTOR_LABELS_JA = {
 # ---------------------------------------------------------------
 def fetch_data() -> pd.DataFrame:
     df = (Query()
-        .select('name', 'description', 'logoid', 'sector', 'industry', 'market_cap_basic',
+        .select('name', 'description', 'sector', 'industry', 'market_cap_basic',
                 'free_cash_flow_fy',
                 'total_assets_yoy_growth_fy', 'ebitda_yoy_growth_fy',
                 'close', 'price_52_week_high', 'price_52_week_low',
@@ -109,6 +113,10 @@ def fetch_data() -> pd.DataFrame:
                 'cash_f_operating_activities_fy',
                 'total_revenue_yoy_growth_fy',
                 'price_book_ratio',
+                # 足切り用
+                'ebitda_fy',
+                'cash_f_investing_activities_fy',
+                'free_cash_flow_yoy_growth_fy',
         )
         .set_property('options', {'lang': 'ja'})
         .where(
@@ -133,6 +141,28 @@ def fetch_data() -> pd.DataFrame:
         .set_markets('japan')
         .get_scanner_data())[1]
     return df
+
+
+def suspect_masks(ebitda_fy, ebitda_growth, market_cap, fcf_growth, invest_cf, operating_cf):
+    """足切り判定(process と explain_dropped で共通)。欠損値(NaN)は False=切らない。"""
+    ebitda_prev = ebitda_fy / (1 + ebitda_growth / 100)
+    ebitda_prev_to_cap = ebitda_prev / market_cap
+    invest_to_ocf = -invest_cf / operating_cf
+
+    ebitda_suspect = (
+        (ebitda_growth > OUTLIER_EBITDA_GROWTH)
+        & (ebitda_prev_to_cap < MIN_PREV_EBITDA_TO_CAP)
+    )
+    fcf_suspect = (
+        (fcf_growth > SUSPECT_FCF_GROWTH)
+        & (invest_to_ocf < SUSPECT_INVEST_TO_OCF)
+    )
+    return ebitda_suspect, fcf_suspect, ebitda_prev_to_cap, invest_to_ocf
+
+
+def roe_suspect_mask(roe, net_income, ebitda_fy):
+    """ROEが極端に高く、かつ純利益がEBITDAを上回る(本業外の利益の疑い)。NaN は False=切らない。"""
+    return (roe > OUTLIER_ROE) & (net_income > ebitda_fy)
 
 
 def process(df: pd.DataFrame) -> pd.DataFrame:
@@ -161,6 +191,21 @@ def process(df: pd.DataFrame) -> pd.DataFrame:
     # FCFイールドの閾値フィルタ
     df = df[df['fcf_yield'] >= df['fcf_yield_threshold'] * FCF_THRESHOLD_MULT].copy()
 
+    # 足切り(EBITDA成長の分母効果 / FCF急増×投資小)
+    ebitda_suspect, fcf_suspect, prev_to_cap, invest_to_ocf = suspect_masks(
+        df['ebitda_fy'], df['ebitda_yoy_growth_fy'], df['market_cap_basic'],
+        df['free_cash_flow_yoy_growth_fy'], df['cash_f_investing_activities_fy'],
+        df['cash_f_operating_activities_fy'],
+    )
+    df['ebitda_prev_to_cap'] = prev_to_cap
+    df['invest_to_ocf'] = invest_to_ocf
+    roe_suspect = roe_suspect_mask(
+        df['return_on_equity'], df['net_income_fy'], df['ebitda_fy'])
+    print(f"足切り: EBITDA分母効果={int(ebitda_suspect.sum())}件, "
+          f"FCF急増×投資小={int(fcf_suspect.sum())}件, "
+          f"ROE高×純利益>EBITDA={int(roe_suspect.sum())}件 / {len(df)}件中")
+    df = df[~(ebitda_suspect | fcf_suspect | roe_suspect)].copy()
+
     # 極端値フラグ(除外せず表示)
     df['outlier_flag'] = (
         (df['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH)
@@ -181,7 +226,8 @@ def save_and_diff(df: pd.DataFrame):
     prev_files = sorted(f for f in glob.glob(f"{SNAP_DIR}/*.csv") if f != today_path)
 
     cols = ['name', 'description', 'sector', 'fcf_yield', 'market_cap_basic',
-            'ebitda_yoy_growth_fy', 'return_on_equity', 'debt_to_equity', 'outlier_flag']
+            'ebitda_yoy_growth_fy', 'return_on_equity', 'debt_to_equity', 'outlier_flag',
+            'free_cash_flow_yoy_growth_fy', 'invest_to_ocf', 'ebitda_prev_to_cap']
     snap = df[cols].copy()
     snap.insert(0, 'rank', range(1, len(snap) + 1))
     snap.to_csv(today_path, index=False)
@@ -210,7 +256,9 @@ def explain_dropped(dropped: pd.DataFrame) -> pd.DataFrame:
                      'ebitda_yoy_growth_fy', 'total_revenue_yoy_growth_fy',
                      'total_assets_yoy_growth_fy', 'net_income_fy', 'return_on_equity',
                      'debt_to_equity', 'current_ratio', 'average_volume_10d_calc',
-                     'earnings_release_date')
+                     'earnings_release_date',
+                     'ebitda_fy', 'cash_f_investing_activities_fy',
+                     'free_cash_flow_yoy_growth_fy')
              .where(col('name').isin(names), col('exchange') == 'TSE',
                     col('is_primary') == True)
              .limit(len(names) + 50)
@@ -231,6 +279,14 @@ def explain_dropped(dropped: pd.DataFrame) -> pd.DataFrame:
     fcf_yield = d['free_cash_flow_fy'] / d['market_cap_basic']
     fcf_thr = d['sector'].map(SECTOR_FCF_YIELD).fillna(0.04)
     avg_value = d['average_volume_10d_calc'] * d['close']
+    ebitda_suspect, fcf_suspect, _, _ = suspect_masks(
+        d['ebitda_fy'], d['ebitda_yoy_growth_fy'], d['market_cap_basic'],
+        d['free_cash_flow_yoy_growth_fy'], d['cash_f_investing_activities_fy'],
+        d['cash_f_operating_activities_fy'],
+    )
+
+    roe_suspect = roe_suspect_mask(
+        d['return_on_equity'], d['net_income_fy'], d['ebitda_fy'])
 
     # NaN は比較が False になり、~ で「条件割れ」扱い(=データ欠損も理由に出る)
     checks = {
@@ -248,6 +304,9 @@ def explain_dropped(dropped: pd.DataFrame) -> pd.DataFrame:
         '売買代金不足': ~(avg_value >= MIN_AVG_VALUE_10D),
         '除外業種': d['industry'].isin(EXCLUDED_INDUSTRIES),
         'FCFイールド閾値割れ': ~(fcf_yield >= fcf_thr * FCF_THRESHOLD_MULT),
+        '足切り:EBITDA成長の分母効果': ebitda_suspect,
+        '足切り:FCF急増×投資小': fcf_suspect,
+        '足切り:ROE高×純利益>EBITDA': roe_suspect,
     }
     reasons = {
         n: ', '.join(k for k, v in checks.items() if v.loc[n])
@@ -300,14 +359,6 @@ def make_range_bar(pct):
         f'<span class="range-bar-label">{pct:.0f}%</span>'
         f'</span>'
     )
-
-
-def make_logo_tag(logoid):
-    """logoidからロゴ<img>タグを生成。logoidが無い場合は空文字。"""
-    if pd.isna(logoid) or not logoid:
-        return ""
-    url = LOGO_BASE_URL.format(logoid=logoid)
-    return f'<img src="{url}" class="logo-icon" alt="" loading="lazy">'
 
 
 def make_sparkline_svg(row, width=64, height=22):
@@ -375,33 +426,44 @@ def make_chart_cell(row):
 
 
 def make_name_cell(row):
-    """ロゴ + 会社名(ティッカーへのリンク)を1セルにまとめる。"""
+    """会社名(ティッカーへのリンク)を1セルにまとめる。"""
     name = row['name']
     if pd.isna(name):
         return ""
     label = row['description'] if pd.notna(row.get('description')) and row['description'] else name
-    logo_tag = make_logo_tag(row.get('logoid'))
     link = (
         f'<a href="https://jp.tradingview.com/symbols/TSE-{name}/" '
         f'target="_blank" title="{escape(str(label))}">{escape(str(label))}</a>'
     )
-    return f'<span class="name-cell">{logo_tag}{link}</span>'
+    return f'<span class="name-cell">{link}</span>'
+
+
+def mark(flag, text):
+    """極端値のとき、数値の頭に ⚠️ を付ける。"""
+    return f"⚠️{text}" if flag else text
 
 
 def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame(index=df.index)
 
     result[COLUMN_LABELS_JA['name']] = df.apply(make_name_cell, axis=1)
-    result['⚠️'] = df['outlier_flag'].map({True: '⚠️', False: ''})
     result[COLUMN_LABELS_JA['sector']] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
     result['株価推移(52週レンジ位置)'] = df.apply(make_chart_cell, axis=1)
 
     # FCFイールドと閾値を1カラムに統合
     result['FCFイールド'] = df.apply(
-        lambda r: f"{r['fcf_yield']:.2%}(閾値{r['fcf_yield_threshold']:.2%})", axis=1
+        lambda r: mark(
+            r['fcf_yield'] > OUTLIER_FCF_YIELD,
+            f"{r['fcf_yield']:.2%}(閾値{r['fcf_yield_threshold']:.2%})"),
+        axis=1
     )
 
-    result['EBITDA成長率(%)'] = df['ebitda_yoy_growth_fy']
+    result['EBITDA成長率(%)'] = df.apply(
+        lambda r: mark(
+            r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH,
+            f"{r['ebitda_yoy_growth_fy']:.1f}"),
+        axis=1
+    )
 
     # EBITDA-資産成長差(上限クリップ時は + を付ける)と資産縮小フラグを1カラムに統合
     def gap_label(r):
@@ -414,7 +476,12 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
 
     result['EBITDA-資産成長差'] = df.apply(gap_label, axis=1)
 
-    result['ROE(基準8.0以上)'] = df['return_on_equity']
+    result['ROE(基準8.0以上)'] = df.apply(
+        lambda r: mark(
+            r['return_on_equity'] > OUTLIER_ROE,
+            f"{r['return_on_equity']:.1f}"),
+        axis=1
+    )
     result['D/E倍率(基準0〜2.00)'] = df['debt_to_equity']
 
     return result
@@ -445,8 +512,6 @@ def build_diff_html(df, title, yield_label, with_reason=False) -> str:
 
 def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     format_dict = {
-        'EBITDA成長率(%)': '{:.1f}',
-        'ROE(基準8.0以上)': '{:.1f}',
         'D/E倍率(基準0〜2.00)': '{:.2f}',
     }
 
@@ -468,8 +533,8 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     cap_max = MARKET_CAP_MAX / 1e8
     legend = (
         f"時価総額 {cap_min:,.0f}〜{cap_max:,.0f}億円 ／ "
-        f"⚠️ = EBITDA成長&gt;{OUTLIER_EBITDA_GROWTH}% または FCFイールド&gt;{OUTLIER_FCF_YIELD:.0%} "
-        f"または ROE&gt;{OUTLIER_ROE}%(一時要因の可能性)"
+        f"数値の頭の ⚠️ = EBITDA成長&gt;{OUTLIER_EBITDA_GROWTH}%、"
+        f"FCFイールド&gt;{OUTLIER_FCF_YIELD:.0%}、ROE&gt;{OUTLIER_ROE}%(一時要因の可能性)"
     )
 
     return f"""<!DOCTYPE html>
@@ -542,14 +607,6 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
-  }}
-  .logo-icon {{
-    width: 18px;
-    height: 18px;
-    object-fit: contain;
-    border-radius: 3px;
-    flex-shrink: 0;
-    background: #fff;
   }}
   .sparkline {{
     display: block;
