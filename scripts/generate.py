@@ -498,18 +498,13 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
         axis=1
     )
 
-    result['EBITDA成長率(%)'] = df.apply(
-        lambda r: mark(
-            r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH,
-            f"{r['ebitda_yoy_growth_fy']:.1f}"),
-        axis=1
-    )
-
-    # EBITDA-資産成長差(上限クリップ時は + を付ける)と資産縮小フラグを1カラムに統合
+    # EBITDA-資産成長差(上限クリップ時は + を付ける)に、EBITDA成長の極端値と資産縮小の警告を統合
     def gap_label(r):
         text = f"{r['ebitda_vs_assets_growth']:.1f}"
         if r['ebitda_vs_assets_growth_raw'] > GROWTH_GAP_CLIP:
             text += "+"
+        if r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH:
+            text += f" ⚠️(EBITDA成長>{OUTLIER_EBITDA_GROWTH}%)"
         if r['asset_shrinking']:
             text += " ⚠️(資産縮小)"
         return text
@@ -520,7 +515,6 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: mark(r['roe_warn'], f"{r['return_on_equity']:.1f}"),
         axis=1
     )
-    result['D/E倍率(基準0〜2.00)'] = df['debt_to_equity']
 
     def reasons_cell(r):
         if not r['warn_reasons']:
@@ -557,13 +551,8 @@ def build_diff_html(df, title, yield_label, with_reason=False) -> str:
 
 
 def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
-    format_dict = {
-        'D/E倍率(基準0〜2.00)': '{:.2f}',
-    }
-
     table_html = (
         result.style
-        .format(format_dict)
         .hide(axis="index")
         .set_table_attributes('class="screener-table"')
         .to_html(escape=False)
@@ -579,7 +568,7 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     cap_max = MARKET_CAP_MAX / 1e8
     legend = (
         f"時価総額 {cap_min:,.0f}〜{cap_max:,.0f}億円 ／ "
-        f"数値の頭の ⚠️ = EBITDA成長&gt;{OUTLIER_EBITDA_GROWTH}%、"
+        f"⚠️ = EBITDA成長&gt;{OUTLIER_EBITDA_GROWTH}%(EBITDA-資産成長差列)、"
         f"FCFイールド&gt;{OUTLIER_FCF_YIELD:.0%}、ROE&gt;{OUTLIER_ROE}%・自己資本が薄い・高レバレッジ"
         f"(一時要因の可能性)。理由は右端の「警告の理由」列に表示"
     )
