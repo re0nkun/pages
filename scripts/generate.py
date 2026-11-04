@@ -43,6 +43,10 @@ OUTLIER_EBITDA_GROWTH = 100  # %
 OUTLIER_FCF_YIELD = 0.20     # 比率(20%)
 OUTLIER_ROE = 40             # %
 GROWTH_GAP_CLIP = 100        # EBITDA-資産成長差の表示上限
+# 自己資本まわりの警告(除外せず表示のみ。閾値は仮置き)
+THIN_EQUITY_TO_CAP = 0.10    # 推定自己資本/時価総額(=1/PBR)がこれ未満 → ROEの分母が小さい
+HIGH_LEVERAGE_X = 4.0        # ROE/ROA(=総資産/自己資本の目安)がこれ超
+LOW_ROA_FOR_LEVERAGE = 4.0   # ROA(%)がこれ未満でROEだけ高い → 借入起因を疑う
 
 # 足切り(一時要因の疑いが強い組み合わせのみ除外。閾値は仮置き)
 MIN_PREV_EBITDA_TO_CAP = 0.01   # 前年EBITDAが時価総額の1%未満なら「分母が小さい」
@@ -107,6 +111,7 @@ def fetch_data() -> pd.DataFrame:
                 'Perf.W', 'Perf.1M', 'Perf.3M', 'Perf.6M', 'Perf.Y',
                 'debt_to_equity',
                 'return_on_equity',
+                'return_on_assets',
                 'net_income_fy',
                 'current_ratio',
                 'average_volume_10d_calc',
@@ -165,6 +170,29 @@ def roe_suspect_mask(roe, net_income, ebitda_fy):
     return (roe > OUTLIER_ROE) & (net_income > ebitda_fy)
 
 
+def warning_reasons(r) -> list:
+    """⚠️の根拠を人が読める文にして返す(NaN比較はFalseなので該当しない)。"""
+    out = []
+    if r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH:
+        out.append(f"EBITDA成長{r['ebitda_yoy_growth_fy']:.0f}%(>{OUTLIER_EBITDA_GROWTH}%): "
+                   "前年が小さい反動など一時要因の可能性")
+    if r['fcf_yield'] > OUTLIER_FCF_YIELD:
+        out.append(f"FCFイールド{r['fcf_yield']:.0%}(>{OUTLIER_FCF_YIELD:.0%}): "
+                   "一時的なFCF増の可能性")
+    if r['return_on_equity'] > OUTLIER_ROE:
+        out.append(f"ROE{r['return_on_equity']:.0f}%(>{OUTLIER_ROE}%): "
+                   "特別利益・自己資本の縮小・借入の可能性")
+    if r['equity_thin']:
+        out.append(f"自己資本が薄い(推定で時価総額の{r['equity_to_cap']:.0%}、PBR{r['price_book_ratio']:.1f}): "
+                   "ROEの分母が小さく、数値が膨らみやすい")
+    if r['leverage_driven']:
+        out.append(f"高レバレッジ起因の疑い(ROE{r['return_on_equity']:.0f}% / ROA{r['return_on_assets']:.1f}% "
+                   f"= {r['leverage_x']:.1f}倍): ROEが収益力より借入で押し上げられている可能性")
+    if r['asset_shrinking']:
+        out.append("総資産が前年比で縮小: EBITDA成長が資産圧縮によるものかも")
+    return out
+
+
 def process(df: pd.DataFrame) -> pd.DataFrame:
     df = df[~df['industry'].isin(EXCLUDED_INDUSTRIES)].copy()
 
@@ -212,6 +240,18 @@ def process(df: pd.DataFrame) -> pd.DataFrame:
         | (df['fcf_yield'] > OUTLIER_FCF_YIELD)
         | (df['return_on_equity'] > OUTLIER_ROE)
     )
+
+    # 自己資本ゼロ近傍 / 高レバレッジ(自己資本は 時価総額/PBR の逆算なので 1/PBR で十分)
+    pbr = df['price_book_ratio']
+    df['equity_to_cap'] = 1 / pbr.where(pbr > 0)
+    df['equity_thin'] = (pbr <= 0) | (df['equity_to_cap'] < THIN_EQUITY_TO_CAP)
+    roa = df['return_on_assets']
+    df['leverage_x'] = df['return_on_equity'] / roa.where(roa > 0)
+    df['leverage_driven'] = (
+        (df['leverage_x'] > HIGH_LEVERAGE_X) & (roa < LOW_ROA_FOR_LEVERAGE)
+    )
+    df['roe_warn'] = (df['return_on_equity'] > OUTLIER_ROE) | df['equity_thin'] | df['leverage_driven']
+    df['warn_reasons'] = df.apply(warning_reasons, axis=1)
 
     return df.sort_values('fcf_yield', ascending=False)
 
@@ -477,12 +517,18 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
     result['EBITDA-資産成長差'] = df.apply(gap_label, axis=1)
 
     result['ROE(基準8.0以上)'] = df.apply(
-        lambda r: mark(
-            r['return_on_equity'] > OUTLIER_ROE,
-            f"{r['return_on_equity']:.1f}"),
+        lambda r: mark(r['roe_warn'], f"{r['return_on_equity']:.1f}"),
         axis=1
     )
     result['D/E倍率(基準0〜2.00)'] = df['debt_to_equity']
+
+    def reasons_cell(r):
+        if not r['warn_reasons']:
+            return ""
+        items = "<br>".join(f"⚠️ {escape(t)}" for t in r['warn_reasons'])
+        return f'<span style="font-size:0.8rem;line-height:1.5">{items}</span>'
+
+    result['警告の理由'] = df.apply(reasons_cell, axis=1)
 
     return result
 
@@ -534,7 +580,8 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     legend = (
         f"時価総額 {cap_min:,.0f}〜{cap_max:,.0f}億円 ／ "
         f"数値の頭の ⚠️ = EBITDA成長&gt;{OUTLIER_EBITDA_GROWTH}%、"
-        f"FCFイールド&gt;{OUTLIER_FCF_YIELD:.0%}、ROE&gt;{OUTLIER_ROE}%(一時要因の可能性)"
+        f"FCFイールド&gt;{OUTLIER_FCF_YIELD:.0%}、ROE&gt;{OUTLIER_ROE}%・自己資本が薄い・高レバレッジ"
+        f"(一時要因の可能性)。理由は右端の「警告の理由」列に表示"
     )
 
     return f"""<!DOCTYPE html>
