@@ -132,6 +132,7 @@ def fetch_data() -> pd.DataFrame:
             col('market_cap_basic').between(MARKET_CAP_MIN, MARKET_CAP_MAX),
             col('free_cash_flow_fy') > 0,
             col('cash_f_operating_activities_fy') > 0,
+            col('ebitda_fy') > 0,
             col('ebitda_yoy_growth_fy') >= MIN_EBITDA_GROWTH,
             col('total_revenue_yoy_growth_fy') >= MIN_REVENUE_GROWTH,
             col('total_assets_yoy_growth_fy') >= MIN_ASSET_GROWTH,
@@ -178,8 +179,14 @@ def warning_reasons(r) -> dict:
         out['fcf'].append(f"FCFイールド{r['fcf_yield']:.0%}(>{OUTLIER_FCF_YIELD:.0%}): "
                           "一時的なFCF増の可能性")
     if r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH:
-        out['gap'].append(f"EBITDA成長{r['ebitda_yoy_growth_fy']:.0f}%(>{OUTLIER_EBITDA_GROWTH}%): "
-                          "前年が小さい反動など一時要因の可能性")
+        msg = f"EBITDA成長{r['ebitda_yoy_growth_fy']:.0f}%(>{OUTLIER_EBITDA_GROWTH}%): "
+        if pd.notna(r['ebitda_prev_to_cap']):
+            msg += (f"前年EBITDAは時価総額の{r['ebitda_prev_to_cap']:.1%}"
+                    f"(足切り基準{MIN_PREV_EBITDA_TO_CAP:.0%}未満)。")
+        msg += "前年が小さい反動など一時要因の可能性"
+        out['gap'].append(msg)
+    if r['ebitda_vs_assets_growth_raw'] > GROWTH_GAP_CLIP:
+        out['gap'].append(f"差が{r['ebitda_vs_assets_growth_raw']:.0f}ptで、表示は{GROWTH_GAP_CLIP}で丸め(+表示)")
     if r['asset_shrinking']:
         out['gap'].append("総資産が前年比で縮小: EBITDA成長が資産圧縮によるものかも")
     if r['return_on_equity'] > OUTLIER_ROE:
@@ -336,6 +343,7 @@ def explain_dropped(dropped: pd.DataFrame) -> pd.DataFrame:
         '時価総額範囲外': ~d['market_cap_basic'].between(MARKET_CAP_MIN, MARKET_CAP_MAX),
         'FCF<=0': ~(d['free_cash_flow_fy'] > 0),
         '営業CF<=0': ~(d['cash_f_operating_activities_fy'] > 0),
+        'EBITDA≤0': ~(d['ebitda_fy'] > 0),
         f'EBITDA成長<{MIN_EBITDA_GROWTH}': ~(d['ebitda_yoy_growth_fy'] >= MIN_EBITDA_GROWTH),
         f'売上成長<{MIN_REVENUE_GROWTH}': ~(d['total_revenue_yoy_growth_fy'] >= MIN_REVENUE_GROWTH),
         f'資産成長<{MIN_ASSET_GROWTH}': ~(d['total_assets_yoy_growth_fy'] >= MIN_ASSET_GROWTH),
