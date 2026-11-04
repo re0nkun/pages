@@ -170,26 +170,27 @@ def roe_suspect_mask(roe, net_income, ebitda_fy):
     return (roe > OUTLIER_ROE) & (net_income > ebitda_fy)
 
 
-def warning_reasons(r) -> list:
-    """⚠️の根拠を人が読める文にして返す(NaN比較はFalseなので該当しない)。"""
-    out = []
-    if r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH:
-        out.append(f"EBITDA成長{r['ebitda_yoy_growth_fy']:.0f}%(>{OUTLIER_EBITDA_GROWTH}%): "
-                   "前年が小さい反動など一時要因の可能性")
+def warning_reasons(r) -> dict:
+    """⚠️の根拠を、表示列ごと(fcf / gap / roe)に人が読める文のリストで返す。
+    NaN比較はFalseなので該当しない。"""
+    out = {'fcf': [], 'gap': [], 'roe': []}
     if r['fcf_yield'] > OUTLIER_FCF_YIELD:
-        out.append(f"FCFイールド{r['fcf_yield']:.0%}(>{OUTLIER_FCF_YIELD:.0%}): "
-                   "一時的なFCF増の可能性")
-    if r['return_on_equity'] > OUTLIER_ROE:
-        out.append(f"ROE{r['return_on_equity']:.0f}%(>{OUTLIER_ROE}%): "
-                   "特別利益・自己資本の縮小・借入の可能性")
-    if r['equity_thin']:
-        out.append(f"自己資本が薄い(推定で時価総額の{r['equity_to_cap']:.0%}、PBR{r['price_book_ratio']:.1f}): "
-                   "ROEの分母が小さく、数値が膨らみやすい")
-    if r['leverage_driven']:
-        out.append(f"高レバレッジ起因の疑い(ROE{r['return_on_equity']:.0f}% / ROA{r['return_on_assets']:.1f}% "
-                   f"= {r['leverage_x']:.1f}倍): ROEが収益力より借入で押し上げられている可能性")
+        out['fcf'].append(f"FCFイールド{r['fcf_yield']:.0%}(>{OUTLIER_FCF_YIELD:.0%}): "
+                          "一時的なFCF増の可能性")
+    if r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH:
+        out['gap'].append(f"EBITDA成長{r['ebitda_yoy_growth_fy']:.0f}%(>{OUTLIER_EBITDA_GROWTH}%): "
+                          "前年が小さい反動など一時要因の可能性")
     if r['asset_shrinking']:
-        out.append("総資産が前年比で縮小: EBITDA成長が資産圧縮によるものかも")
+        out['gap'].append("総資産が前年比で縮小: EBITDA成長が資産圧縮によるものかも")
+    if r['return_on_equity'] > OUTLIER_ROE:
+        out['roe'].append(f"ROE{r['return_on_equity']:.0f}%(>{OUTLIER_ROE}%): "
+                          "特別利益・自己資本の縮小・借入の可能性")
+    if r['equity_thin']:
+        out['roe'].append(f"自己資本が薄い(推定で時価総額の{r['equity_to_cap']:.0%}、PBR{r['price_book_ratio']:.1f}): "
+                          "ROEの分母が小さく、数値が膨らみやすい")
+    if r['leverage_driven']:
+        out['roe'].append(f"高レバレッジ起因の疑い(ROE{r['return_on_equity']:.0f}% / ROA{r['return_on_assets']:.1f}% "
+                          f"= {r['leverage_x']:.1f}倍): ROEが収益力より借入で押し上げられている可能性")
     return out
 
 
@@ -251,7 +252,9 @@ def process(df: pd.DataFrame) -> pd.DataFrame:
         (df['leverage_x'] > HIGH_LEVERAGE_X) & (roa < LOW_ROA_FOR_LEVERAGE)
     )
     df['roe_warn'] = (df['return_on_equity'] > OUTLIER_ROE) | df['equity_thin'] | df['leverage_driven']
-    df['warn_reasons'] = df.apply(warning_reasons, axis=1)
+    _reasons = df.apply(warning_reasons, axis=1)
+    for k in ('fcf', 'gap', 'roe'):
+        df[f'warn_{k}'] = _reasons.map(lambda d, k=k: d[k])
 
     return df.sort_values('fcf_yield', ascending=False)
 
@@ -487,8 +490,13 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame(index=df.index)
 
     result[COLUMN_LABELS_JA['name']] = df.apply(make_name_cell, axis=1)
-    result[COLUMN_LABELS_JA['sector']] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
     result['株価推移(52週レンジ位置)'] = df.apply(make_chart_cell, axis=1)
+
+    def reasons_cell(items):
+        if not items:
+            return ""
+        body = "<br>".join(escape(t) for t in items)
+        return f'<span style="font-size:0.8rem;line-height:1.5">{body}</span>'
 
     # FCFイールドと閾値を1カラムに統合
     result['FCFイールド'] = df.apply(
@@ -497,32 +505,26 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
             f"{r['fcf_yield']:.2%}(閾値{r['fcf_yield_threshold']:.2%})"),
         axis=1
     )
+    result['FCF警告の理由'] = df['warn_fcf'].map(reasons_cell)
 
-    # EBITDA-資産成長差(上限クリップ時は + を付ける)に、EBITDA成長の極端値と資産縮小の警告を統合
+    # EBITDA-資産成長差(上限クリップ時は + を付ける)。EBITDA成長の極端値・資産縮小は ⚠️ のみ付け、理由は隣の列
     def gap_label(r):
         text = f"{r['ebitda_vs_assets_growth']:.1f}"
         if r['ebitda_vs_assets_growth_raw'] > GROWTH_GAP_CLIP:
             text += "+"
-        if r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH:
-            text += f" ⚠️(EBITDA成長>{OUTLIER_EBITDA_GROWTH}%)"
-        if r['asset_shrinking']:
-            text += " ⚠️(資産縮小)"
-        return text
+        return mark(bool(r['warn_gap']), text)
 
     result['EBITDA-資産成長差'] = df.apply(gap_label, axis=1)
+    result['成長差警告の理由'] = df['warn_gap'].map(reasons_cell)
 
     result['ROE(基準8.0以上)'] = df.apply(
         lambda r: mark(r['roe_warn'], f"{r['return_on_equity']:.1f}"),
         axis=1
     )
+    result['ROE警告の理由'] = df['warn_roe'].map(reasons_cell)
 
-    def reasons_cell(r):
-        if not r['warn_reasons']:
-            return ""
-        items = "<br>".join(f"⚠️ {escape(t)}" for t in r['warn_reasons'])
-        return f'<span style="font-size:0.8rem;line-height:1.5">{items}</span>'
-
-    result['警告の理由'] = df.apply(reasons_cell, axis=1)
+    # セクターは最後尾
+    result[COLUMN_LABELS_JA['sector']] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
 
     return result
 
@@ -570,7 +572,7 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
         f"時価総額 {cap_min:,.0f}〜{cap_max:,.0f}億円 ／ "
         f"⚠️ = EBITDA成長&gt;{OUTLIER_EBITDA_GROWTH}%(EBITDA-資産成長差列)、"
         f"FCFイールド&gt;{OUTLIER_FCF_YIELD:.0%}、ROE&gt;{OUTLIER_ROE}%・自己資本が薄い・高レバレッジ"
-        f"(一時要因の可能性)。理由は右端の「警告の理由」列に表示"
+        f"(一時要因の可能性)。理由は各指標の右隣の「警告の理由」列に表示"
     )
 
     return f"""<!DOCTYPE html>
