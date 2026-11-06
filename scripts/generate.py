@@ -5,7 +5,7 @@ output/index.html として書き出す。GitHub Actions から日次実行さ�
 
 - 通過銘柄を snapshots/YYYYMMDD.csv に保存し、前日との差分(脱落・新規)を HTML に表示
 - 脱落銘柄は、どの条件を割ったか・時価総額の変化・直近決算日を併記
-- 一時要因の疑いがある銘柄は除外せず ⚠️ で表示(疑いが特に強い組み合わせは「強い疑い」と明記)
+- 一時要因の疑いがある銘柄は除外せず ⚠️ で表示(足切りは行わない)
 - 極端値(EBITDA成長・FCFイールド・ROE)も除外せず ⚠️ フラグで表示
 """
 
@@ -48,11 +48,9 @@ THIN_EQUITY_TO_CAP = 0.10    # 推定自己資本/時価総額(=1/PBR)がこれ�
 HIGH_LEVERAGE_X = 4.0        # ROE/ROA(=総資産/自己資本の目安)がこれ超
 LOW_ROA_FOR_LEVERAGE = 4.0   # ROA(%)がこれ未満でROEだけ高い → 借入起因を疑う
 
-# 強い疑いの警告(旧・足切り条件。除外せず表示のみ。閾値は仮置き)
-MIN_PREV_EBITDA_TO_CAP = 0.01   # 前年EBITDAが時価総額の1%未満なら「分母が小さい」
+# FCFの質に関する警告(除外せず表示のみ。閾値は仮置き)
 SUSPECT_FCF_GROWTH = 100        # FCFが前年比で2倍超
 SUSPECT_INVEST_TO_OCF = 0.2     # 投資CFの支出が営業CFの2割未満(支出=マイナス前提)
-# FCFの質に関する警告(除外せず表示のみ。閾値は仮置き)
 WARN_INVEST_TO_OCF = 0.3        # 投資CF支出/営業CFがこれ未満 → 投資抑制の疑い
 WARN_OCF_TO_EBITDA_HIGH = 1.3   # 営業CF/EBITDAがこれ超 → 運転資本の取り崩しの疑い
 WARN_OCF_TO_EBITDA_LOW = 0.5    # 営業CF/EBITDAがこれ未満 → 利益のキャッシュ化不足
@@ -122,7 +120,7 @@ def fetch_data() -> pd.DataFrame:
                 'cash_f_operating_activities_fy',
                 'total_revenue_yoy_growth_fy',
                 'price_book_ratio',
-                # 強い疑いの警告用
+                # 警告用(FCF急増・EBITDA分母効果など)
                 'ebitda_fy',
                 'cash_f_investing_activities_fy',
                 'free_cash_flow_yoy_growth_fy',
@@ -154,58 +152,46 @@ def fetch_data() -> pd.DataFrame:
 
 
 def warning_reasons(r) -> dict:
-    """⚠️の根拠を、表示列ごと(fcf / gap / roe)に人が読める文のリストで返す。
-    NaN比較はFalseなので該当しない。旧・足切り条件は「強い疑い」として明記する。"""
+    """⚠️の根拠を、表示列ごと(fcf / gap / roe)に短い文のリストで返す。
+    閾値は定数を参照(文中には書かない)。NaN比較はFalseなので該当しない。"""
     out = {'fcf': [], 'gap': [], 'roe': []}
 
     # --- FCF列 ---
     if r['fcf_yield'] > OUTLIER_FCF_YIELD:
-        out['fcf'].append(f"FCFイールド{r['fcf_yield']:.0%}(>{OUTLIER_FCF_YIELD:.0%}): "
-                          "一時的なFCF増の可能性")
+        out['fcf'].append(f"FCFイールド{r['fcf_yield']:.0%}: 一時増の疑い")
     if (r['free_cash_flow_yoy_growth_fy'] > SUSPECT_FCF_GROWTH
             and r['invest_to_ocf'] < SUSPECT_INVEST_TO_OCF):
-        out['fcf'].append(f"FCF前年比+{r['free_cash_flow_yoy_growth_fy']:.0f}%かつ"
-                          f"投資CF支出/営業CF={r['invest_to_ocf']:.2f}(<{SUSPECT_INVEST_TO_OCF}): "
-                          "強い疑い。投資を抑えたFCF急増の可能性")
+        out['fcf'].append(f"FCF{r['free_cash_flow_yoy_growth_fy']:+.0f}%×投資少"
+                          f"({r['invest_to_ocf']:.2f}): 投資抑制の疑い")
     if r['invest_to_ocf'] < 0:
-        out['fcf'].append(f"投資CFがプラス(投資CF支出/営業CF={r['invest_to_ocf']:.2f}): "
-                          "資産売却による現金流入の可能性")
+        out['fcf'].append("投資CFプラス: 資産売却の疑い")
     elif r['invest_to_ocf'] < WARN_INVEST_TO_OCF:
-        out['fcf'].append(f"投資CF支出/営業CF={r['invest_to_ocf']:.2f}(<{WARN_INVEST_TO_OCF}): "
-                          "投資を抑えてFCFが大きく見えている可能性")
+        out['fcf'].append(f"投資少({r['invest_to_ocf']:.2f}): 投資抑制の疑い")
     if r['ocf_to_ebitda'] > WARN_OCF_TO_EBITDA_HIGH:
-        out['fcf'].append(f"営業CF/EBITDA={r['ocf_to_ebitda']:.2f}(>{WARN_OCF_TO_EBITDA_HIGH}): "
-                          "運転資本の取り崩しでFCFが膨らんでいる可能性")
+        out['fcf'].append(f"営業CF/EBITDA {r['ocf_to_ebitda']:.2f}: 運転資本の取崩し")
     elif r['ocf_to_ebitda'] < WARN_OCF_TO_EBITDA_LOW:
-        out['fcf'].append(f"営業CF/EBITDA={r['ocf_to_ebitda']:.2f}(<{WARN_OCF_TO_EBITDA_LOW}): "
-                          "利益が現金に変わっていない可能性(売掛金・在庫の増加など)")
+        out['fcf'].append(f"営業CF/EBITDA {r['ocf_to_ebitda']:.2f}: 現金化不足")
 
     # --- EBITDA-資産成長差列 ---
     if r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH:
-        msg = f"EBITDA成長{r['ebitda_yoy_growth_fy']:.0f}%(>{OUTLIER_EBITDA_GROWTH}%): "
-        if pd.notna(r['ebitda_prev_to_cap']):
-            msg += f"前年EBITDAは時価総額の{r['ebitda_prev_to_cap']:.1%}。"
-            if r['ebitda_prev_to_cap'] < MIN_PREV_EBITDA_TO_CAP:
-                msg += f"{MIN_PREV_EBITDA_TO_CAP:.0%}未満で分母効果の疑いが強い。"
-        msg += "前年が小さい反動など一時要因の可能性"
-        out['gap'].append(msg)
-    if r['ebitda_vs_assets_growth_raw'] > GROWTH_GAP_CLIP:
-        out['gap'].append(f"差が{r['ebitda_vs_assets_growth_raw']:.0f}ptで、表示は{GROWTH_GAP_CLIP}で丸め(+表示)")
+        prev = (f"(前年は時価総額の{r['ebitda_prev_to_cap']:.1%})"
+                if pd.notna(r['ebitda_prev_to_cap']) else "")
+        out['gap'].append(f"EBITDA{r['ebitda_yoy_growth_fy']:+.0f}%{prev}: 反動・分母効果の疑い")
     if r['asset_shrinking']:
-        out['gap'].append("総資産が前年比で縮小: EBITDA成長が資産圧縮によるものかも")
+        out['gap'].append("総資産縮小: 圧縮による成長の疑い")
 
     # --- ROE列 ---
     if r['return_on_equity'] > OUTLIER_ROE:
-        out['roe'].append(f"ROE{r['return_on_equity']:.0f}%(>{OUTLIER_ROE}%): "
-                          "特別利益・自己資本の縮小・借入の可能性")
+        out['roe'].append(f"ROE{r['return_on_equity']:.0f}%: 特別利益・借入の疑い")
         if r['net_income_fy'] > r['ebitda_fy']:
-            out['roe'].append("純利益がEBITDAを上回る(強い疑い): 本業外の利益の可能性")
+            out['roe'].append("純利益>EBITDA: 本業外利益の疑い")
     if r['equity_thin']:
-        out['roe'].append(f"自己資本が薄い(推定で時価総額の{r['equity_to_cap']:.0%}、PBR{r['price_book_ratio']:.1f}): "
-                          "ROEの分母が小さく、数値が膨らみやすい")
+        if pd.notna(r['equity_to_cap']):
+            out['roe'].append(f"自己資本薄(時価総額の{r['equity_to_cap']:.0%}): ROE膨張の疑い")
+        else:
+            out['roe'].append("自己資本薄(PBR≤0): ROE膨張の疑い")
     if r['leverage_driven']:
-        out['roe'].append(f"高レバレッジ起因の疑い(ROE{r['return_on_equity']:.0f}% / ROA{r['return_on_assets']:.1f}% "
-                          f"= {r['leverage_x']:.1f}倍): ROEが収益力より借入で押し上げられている可能性")
+        out['roe'].append(f"高レバレッジ(ROE/ROA {r['leverage_x']:.1f}倍): 借入起因の疑い")
     return out
 
 
@@ -486,13 +472,15 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame(index=df.index)
 
     result[COLUMN_LABELS_JA['name']] = df.apply(make_name_cell, axis=1)
+    result[COLUMN_LABELS_JA['sector']] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
     result['株価推移(52週レンジ位置)'] = df.apply(make_chart_cell, axis=1)
 
     def reasons_cell(items):
         if not items:
             return ""
         body = "<br>".join(escape(t) for t in items)
-        return f'<span style="font-size:0.8rem;line-height:1.5">{body}</span>'
+        return (f'<span style="display:block;white-space:normal;min-width:220px;'
+                f'text-align:left;font-size:0.8rem;line-height:1.5">{body}</span>')
 
     # FCFイールドと閾値を1カラムに統合
     result['FCFイールド'] = df.apply(
@@ -518,9 +506,6 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
         axis=1
     )
     result['ROE警告の理由'] = df['warn_roe'].map(reasons_cell)
-
-    # セクターは最後尾
-    result[COLUMN_LABELS_JA['sector']] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
 
     return result
 
@@ -566,11 +551,8 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     cap_max = MARKET_CAP_MAX / 1e8
     legend = (
         f"時価総額 {cap_min:,.0f}〜{cap_max:,.0f}億円 ／ "
-        f"⚠️ = EBITDA成長&gt;{OUTLIER_EBITDA_GROWTH}%(EBITDA-資産成長差列)、"
-        f"FCFイールド&gt;{OUTLIER_FCF_YIELD:.0%}・FCF急増×投資小・投資抑制・資産売却・運転資本取り崩し・現金化不足、"
-        f"ROE&gt;{OUTLIER_ROE}%・純利益&gt;EBITDA・自己資本が薄い・高レバレッジ"
-        f"(一時要因の可能性。足切りは行わず全て表示)。理由は各指標の右隣の「警告の理由」列に表示。"
-        f"「強い疑い」は旧足切り条件に該当"
+        "⚠️ = 一時要因の疑いあり(足切りは行わず全て表示)。理由は各指標の右隣の「警告の理由」列 ／ "
+        "成長差の「+」= 差が100pt超で100に丸め"
     )
 
     return f"""<!DOCTYPE html>
