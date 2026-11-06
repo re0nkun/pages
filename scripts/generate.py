@@ -52,6 +52,10 @@ LOW_ROA_FOR_LEVERAGE = 4.0   # ROA(%)がこれ未満でROEだけ高い → 借�
 MIN_PREV_EBITDA_TO_CAP = 0.01   # 前年EBITDAが時価総額の1%未満なら「分母が小さい」
 SUSPECT_FCF_GROWTH = 100        # FCFが前年比で2倍超
 SUSPECT_INVEST_TO_OCF = 0.2     # 投資CFの支出が営業CFの2割未満(支出=マイナス前提)
+# FCFの質に関する警告(除外せず表示のみ。閾値は仮置き)
+WARN_INVEST_TO_OCF = 0.3        # 投資CF支出/営業CFがこれ未満 → 投資抑制の疑い
+WARN_OCF_TO_EBITDA_HIGH = 1.3   # 営業CF/EBITDAがこれ超 → 運転資本の取り崩しの疑い
+WARN_OCF_TO_EBITDA_LOW = 0.5    # 営業CF/EBITDAがこれ未満 → 利益のキャッシュ化不足
 
 SECTOR_FCF_YIELD = {s: t for t, ss in [
     (0.03, ['Electronic Technology', 'Technology Services', 'Health Technology']),
@@ -178,6 +182,18 @@ def warning_reasons(r) -> dict:
     if r['fcf_yield'] > OUTLIER_FCF_YIELD:
         out['fcf'].append(f"FCFイールド{r['fcf_yield']:.0%}(>{OUTLIER_FCF_YIELD:.0%}): "
                           "一時的なFCF増の可能性")
+    if r['invest_to_ocf'] < 0:
+        out['fcf'].append(f"投資CFがプラス(投資CF支出/営業CF={r['invest_to_ocf']:.2f}): "
+                          "資産売却による現金流入の可能性")
+    elif r['invest_to_ocf'] < WARN_INVEST_TO_OCF:
+        out['fcf'].append(f"投資CF支出/営業CF={r['invest_to_ocf']:.2f}(<{WARN_INVEST_TO_OCF}): "
+                          "投資を抑えてFCFが大きく見えている可能性")
+    if r['ocf_to_ebitda'] > WARN_OCF_TO_EBITDA_HIGH:
+        out['fcf'].append(f"営業CF/EBITDA={r['ocf_to_ebitda']:.2f}(>{WARN_OCF_TO_EBITDA_HIGH}): "
+                          "運転資本の取り崩しでFCFが膨らんでいる可能性")
+    elif r['ocf_to_ebitda'] < WARN_OCF_TO_EBITDA_LOW:
+        out['fcf'].append(f"営業CF/EBITDA={r['ocf_to_ebitda']:.2f}(<{WARN_OCF_TO_EBITDA_LOW}): "
+                          "利益が現金に変わっていない可能性(売掛金・在庫の増加など)")
     if r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH:
         msg = f"EBITDA成長{r['ebitda_yoy_growth_fy']:.0f}%(>{OUTLIER_EBITDA_GROWTH}%): "
         if pd.notna(r['ebitda_prev_to_cap']):
@@ -235,6 +251,7 @@ def process(df: pd.DataFrame) -> pd.DataFrame:
     )
     df['ebitda_prev_to_cap'] = prev_to_cap
     df['invest_to_ocf'] = invest_to_ocf
+    df['ocf_to_ebitda'] = df['cash_f_operating_activities_fy'] / df['ebitda_fy'].where(df['ebitda_fy'] > 0)
     roe_suspect = roe_suspect_mask(
         df['return_on_equity'], df['net_income_fy'], df['ebitda_fy'])
     print(f"足切り: EBITDA分母効果={int(ebitda_suspect.sum())}件, "
@@ -509,7 +526,7 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
     # FCFイールドと閾値を1カラムに統合
     result['FCFイールド'] = df.apply(
         lambda r: mark(
-            r['fcf_yield'] > OUTLIER_FCF_YIELD,
+            bool(r['warn_fcf']),
             f"{r['fcf_yield']:.2%}(閾値{r['fcf_yield_threshold']:.2%})"),
         axis=1
     )
@@ -579,7 +596,7 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     legend = (
         f"時価総額 {cap_min:,.0f}〜{cap_max:,.0f}億円 ／ "
         f"⚠️ = EBITDA成長&gt;{OUTLIER_EBITDA_GROWTH}%(EBITDA-資産成長差列)、"
-        f"FCFイールド&gt;{OUTLIER_FCF_YIELD:.0%}、ROE&gt;{OUTLIER_ROE}%・自己資本が薄い・高レバレッジ"
+        f"FCFイールド&gt;{OUTLIER_FCF_YIELD:.0%}・投資抑制・資産売却・運転資本取り崩し・現金化不足、ROE&gt;{OUTLIER_ROE}%・自己資本が薄い・高レバレッジ"
         f"(一時要因の可能性)。理由は各指標の右隣の「警告の理由」列に表示"
     )
 
