@@ -5,8 +5,8 @@ output/index.html として書き出す。GitHub Actions から日次実行さ�
 
 - 通過銘柄を snapshots/YYYYMMDD.csv に保存し、前日との差分(脱落・新規)を HTML に表示
 - 脱落銘柄は、どの条件を割ったか・時価総額の変化・直近決算日を併記
-- 一時要因の疑いが強い銘柄は足切り(EBITDA成長の分母効果 / FCF急増×投資小 / ROE高×純利益>EBITDA)
-- 極端値(EBITDA成長・FCFイールド・ROE)は除外せず ⚠️ フラグで表示
+- 一時要因の疑いがある銘柄は除外せず ⚠️ で表示(疑いが特に強い組み合わせは「強い疑い」と明記)
+- 極端値(EBITDA成長・FCFイールド・ROE)も除外せず ⚠️ フラグで表示
 """
 
 import glob
@@ -48,7 +48,7 @@ THIN_EQUITY_TO_CAP = 0.10    # 推定自己資本/時価総額(=1/PBR)がこれ�
 HIGH_LEVERAGE_X = 4.0        # ROE/ROA(=総資産/自己資本の目安)がこれ超
 LOW_ROA_FOR_LEVERAGE = 4.0   # ROA(%)がこれ未満でROEだけ高い → 借入起因を疑う
 
-# 足切り(一時要因の疑いが強い組み合わせのみ除外。閾値は仮置き)
+# 強い疑いの警告(旧・足切り条件。除外せず表示のみ。閾値は仮置き)
 MIN_PREV_EBITDA_TO_CAP = 0.01   # 前年EBITDAが時価総額の1%未満なら「分母が小さい」
 SUSPECT_FCF_GROWTH = 100        # FCFが前年比で2倍超
 SUSPECT_INVEST_TO_OCF = 0.2     # 投資CFの支出が営業CFの2割未満(支出=マイナス前提)
@@ -122,7 +122,7 @@ def fetch_data() -> pd.DataFrame:
                 'cash_f_operating_activities_fy',
                 'total_revenue_yoy_growth_fy',
                 'price_book_ratio',
-                # 足切り用
+                # 強い疑いの警告用
                 'ebitda_fy',
                 'cash_f_investing_activities_fy',
                 'free_cash_flow_yoy_growth_fy',
@@ -153,35 +153,20 @@ def fetch_data() -> pd.DataFrame:
     return df
 
 
-def suspect_masks(ebitda_fy, ebitda_growth, market_cap, fcf_growth, invest_cf, operating_cf):
-    """足切り判定(process と explain_dropped で共通)。欠損値(NaN)は False=切らない。"""
-    ebitda_prev = ebitda_fy / (1 + ebitda_growth / 100)
-    ebitda_prev_to_cap = ebitda_prev / market_cap
-    invest_to_ocf = -invest_cf / operating_cf
-
-    ebitda_suspect = (
-        (ebitda_growth > OUTLIER_EBITDA_GROWTH)
-        & (ebitda_prev_to_cap < MIN_PREV_EBITDA_TO_CAP)
-    )
-    fcf_suspect = (
-        (fcf_growth > SUSPECT_FCF_GROWTH)
-        & (invest_to_ocf < SUSPECT_INVEST_TO_OCF)
-    )
-    return ebitda_suspect, fcf_suspect, ebitda_prev_to_cap, invest_to_ocf
-
-
-def roe_suspect_mask(roe, net_income, ebitda_fy):
-    """ROEが極端に高く、かつ純利益がEBITDAを上回る(本業外の利益の疑い)。NaN は False=切らない。"""
-    return (roe > OUTLIER_ROE) & (net_income > ebitda_fy)
-
-
 def warning_reasons(r) -> dict:
     """⚠️の根拠を、表示列ごと(fcf / gap / roe)に人が読める文のリストで返す。
-    NaN比較はFalseなので該当しない。"""
+    NaN比較はFalseなので該当しない。旧・足切り条件は「強い疑い」として明記する。"""
     out = {'fcf': [], 'gap': [], 'roe': []}
+
+    # --- FCF列 ---
     if r['fcf_yield'] > OUTLIER_FCF_YIELD:
         out['fcf'].append(f"FCFイールド{r['fcf_yield']:.0%}(>{OUTLIER_FCF_YIELD:.0%}): "
                           "一時的なFCF増の可能性")
+    if (r['free_cash_flow_yoy_growth_fy'] > SUSPECT_FCF_GROWTH
+            and r['invest_to_ocf'] < SUSPECT_INVEST_TO_OCF):
+        out['fcf'].append(f"FCF前年比+{r['free_cash_flow_yoy_growth_fy']:.0f}%かつ"
+                          f"投資CF支出/営業CF={r['invest_to_ocf']:.2f}(<{SUSPECT_INVEST_TO_OCF}): "
+                          "強い疑い。投資を抑えたFCF急増の可能性")
     if r['invest_to_ocf'] < 0:
         out['fcf'].append(f"投資CFがプラス(投資CF支出/営業CF={r['invest_to_ocf']:.2f}): "
                           "資産売却による現金流入の可能性")
@@ -194,20 +179,27 @@ def warning_reasons(r) -> dict:
     elif r['ocf_to_ebitda'] < WARN_OCF_TO_EBITDA_LOW:
         out['fcf'].append(f"営業CF/EBITDA={r['ocf_to_ebitda']:.2f}(<{WARN_OCF_TO_EBITDA_LOW}): "
                           "利益が現金に変わっていない可能性(売掛金・在庫の増加など)")
+
+    # --- EBITDA-資産成長差列 ---
     if r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH:
         msg = f"EBITDA成長{r['ebitda_yoy_growth_fy']:.0f}%(>{OUTLIER_EBITDA_GROWTH}%): "
         if pd.notna(r['ebitda_prev_to_cap']):
-            msg += (f"前年EBITDAは時価総額の{r['ebitda_prev_to_cap']:.1%}"
-                    f"(足切り基準{MIN_PREV_EBITDA_TO_CAP:.0%}未満)。")
+            msg += f"前年EBITDAは時価総額の{r['ebitda_prev_to_cap']:.1%}。"
+            if r['ebitda_prev_to_cap'] < MIN_PREV_EBITDA_TO_CAP:
+                msg += f"{MIN_PREV_EBITDA_TO_CAP:.0%}未満で分母効果の疑いが強い。"
         msg += "前年が小さい反動など一時要因の可能性"
         out['gap'].append(msg)
     if r['ebitda_vs_assets_growth_raw'] > GROWTH_GAP_CLIP:
         out['gap'].append(f"差が{r['ebitda_vs_assets_growth_raw']:.0f}ptで、表示は{GROWTH_GAP_CLIP}で丸め(+表示)")
     if r['asset_shrinking']:
         out['gap'].append("総資産が前年比で縮小: EBITDA成長が資産圧縮によるものかも")
+
+    # --- ROE列 ---
     if r['return_on_equity'] > OUTLIER_ROE:
         out['roe'].append(f"ROE{r['return_on_equity']:.0f}%(>{OUTLIER_ROE}%): "
                           "特別利益・自己資本の縮小・借入の可能性")
+        if r['net_income_fy'] > r['ebitda_fy']:
+            out['roe'].append("純利益がEBITDAを上回る(強い疑い): 本業外の利益の可能性")
     if r['equity_thin']:
         out['roe'].append(f"自己資本が薄い(推定で時価総額の{r['equity_to_cap']:.0%}、PBR{r['price_book_ratio']:.1f}): "
                           "ROEの分母が小さく、数値が膨らみやすい")
@@ -243,21 +235,11 @@ def process(df: pd.DataFrame) -> pd.DataFrame:
     # FCFイールドの閾値フィルタ
     df = df[df['fcf_yield'] >= df['fcf_yield_threshold'] * FCF_THRESHOLD_MULT].copy()
 
-    # 足切り(EBITDA成長の分母効果 / FCF急増×投資小)
-    ebitda_suspect, fcf_suspect, prev_to_cap, invest_to_ocf = suspect_masks(
-        df['ebitda_fy'], df['ebitda_yoy_growth_fy'], df['market_cap_basic'],
-        df['free_cash_flow_yoy_growth_fy'], df['cash_f_investing_activities_fy'],
-        df['cash_f_operating_activities_fy'],
-    )
-    df['ebitda_prev_to_cap'] = prev_to_cap
-    df['invest_to_ocf'] = invest_to_ocf
+    # 警告用の比率(足切りは行わない。EBITDA成長>=5% と 営業CF>0 で絞り済みなので0除算なし)
+    ebitda_prev = df['ebitda_fy'] / (1 + df['ebitda_yoy_growth_fy'] / 100)
+    df['ebitda_prev_to_cap'] = ebitda_prev / df['market_cap_basic']
+    df['invest_to_ocf'] = -df['cash_f_investing_activities_fy'] / df['cash_f_operating_activities_fy']
     df['ocf_to_ebitda'] = df['cash_f_operating_activities_fy'] / df['ebitda_fy'].where(df['ebitda_fy'] > 0)
-    roe_suspect = roe_suspect_mask(
-        df['return_on_equity'], df['net_income_fy'], df['ebitda_fy'])
-    print(f"足切り: EBITDA分母効果={int(ebitda_suspect.sum())}件, "
-          f"FCF急増×投資小={int(fcf_suspect.sum())}件, "
-          f"ROE高×純利益>EBITDA={int(roe_suspect.sum())}件 / {len(df)}件中")
-    df = df[~(ebitda_suspect | fcf_suspect | roe_suspect)].copy()
 
     # 極端値フラグ(除外せず表示)
     df['outlier_flag'] = (
@@ -311,7 +293,8 @@ def save_and_diff(df: pd.DataFrame):
 
 
 def explain_dropped(dropped: pd.DataFrame) -> pd.DataFrame:
-    """脱落銘柄をフィルタ無しで再取得し、割った条件・時価総額変化・直近決算日を付ける。"""
+    """脱落銘柄をフィルタ無しで再取得し、割った条件・時価総額変化・直近決算日を付ける。
+    警告(⚠️)は除外条件ではないので対象外。"""
     if dropped is None or dropped.empty:
         return dropped
 
@@ -324,8 +307,7 @@ def explain_dropped(dropped: pd.DataFrame) -> pd.DataFrame:
                      'total_assets_yoy_growth_fy', 'net_income_fy', 'return_on_equity',
                      'debt_to_equity', 'current_ratio', 'average_volume_10d_calc',
                      'earnings_release_date',
-                     'ebitda_fy', 'cash_f_investing_activities_fy',
-                     'free_cash_flow_yoy_growth_fy')
+                     'ebitda_fy')
              .where(col('name').isin(names), col('exchange') == 'TSE',
                     col('is_primary') == True)
              .limit(len(names) + 50)
@@ -346,14 +328,6 @@ def explain_dropped(dropped: pd.DataFrame) -> pd.DataFrame:
     fcf_yield = d['free_cash_flow_fy'] / d['market_cap_basic']
     fcf_thr = d['sector'].map(SECTOR_FCF_YIELD).fillna(0.04)
     avg_value = d['average_volume_10d_calc'] * d['close']
-    ebitda_suspect, fcf_suspect, _, _ = suspect_masks(
-        d['ebitda_fy'], d['ebitda_yoy_growth_fy'], d['market_cap_basic'],
-        d['free_cash_flow_yoy_growth_fy'], d['cash_f_investing_activities_fy'],
-        d['cash_f_operating_activities_fy'],
-    )
-
-    roe_suspect = roe_suspect_mask(
-        d['return_on_equity'], d['net_income_fy'], d['ebitda_fy'])
 
     # NaN は比較が False になり、~ で「条件割れ」扱い(=データ欠損も理由に出る)
     checks = {
@@ -372,9 +346,6 @@ def explain_dropped(dropped: pd.DataFrame) -> pd.DataFrame:
         '売買代金不足': ~(avg_value >= MIN_AVG_VALUE_10D),
         '除外業種': d['industry'].isin(EXCLUDED_INDUSTRIES),
         'FCFイールド閾値割れ': ~(fcf_yield >= fcf_thr * FCF_THRESHOLD_MULT),
-        '足切り:EBITDA成長の分母効果': ebitda_suspect,
-        '足切り:FCF急増×投資小': fcf_suspect,
-        '足切り:ROE高×純利益>EBITDA': roe_suspect,
     }
     reasons = {
         n: ', '.join(k for k, v in checks.items() if v.loc[n])
@@ -596,8 +567,10 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     legend = (
         f"時価総額 {cap_min:,.0f}〜{cap_max:,.0f}億円 ／ "
         f"⚠️ = EBITDA成長&gt;{OUTLIER_EBITDA_GROWTH}%(EBITDA-資産成長差列)、"
-        f"FCFイールド&gt;{OUTLIER_FCF_YIELD:.0%}・投資抑制・資産売却・運転資本取り崩し・現金化不足、ROE&gt;{OUTLIER_ROE}%・自己資本が薄い・高レバレッジ"
-        f"(一時要因の可能性)。理由は各指標の右隣の「警告の理由」列に表示"
+        f"FCFイールド&gt;{OUTLIER_FCF_YIELD:.0%}・FCF急増×投資小・投資抑制・資産売却・運転資本取り崩し・現金化不足、"
+        f"ROE&gt;{OUTLIER_ROE}%・純利益&gt;EBITDA・自己資本が薄い・高レバレッジ"
+        f"(一時要因の可能性。足切りは行わず全て表示)。理由は各指標の右隣の「警告の理由」列に表示。"
+        f"「強い疑い」は旧足切り条件に該当"
     )
 
     return f"""<!DOCTYPE html>
