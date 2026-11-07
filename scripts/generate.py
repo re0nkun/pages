@@ -49,7 +49,7 @@ HIGH_LEVERAGE_X = 4.0        # ROE/ROA(=総資産/自己資本の目安)がこ�
 LOW_ROA_FOR_LEVERAGE = 4.0   # ROA(%)がこれ未満でROEだけ高い → 借入起因を疑う
 
 # FCFの質に関する警告(除外せず表示のみ。閾値は仮置き)
-SUSPECT_FCF_GROWTH = 100        # FCFが前年比で2倍超
+SUSPECT_FCF_GROWTH = 100        # FCFが前年比で2倍超 かつ 下の投資少 → 投資抑制の疑い
 SUSPECT_INVEST_TO_OCF = 0.2     # 投資CFの支出が営業CFの2割未満(支出=マイナス前提)
 WARN_INVEST_TO_OCF = 0.3        # 投資CF支出/営業CFがこれ未満 → 投資抑制の疑い
 WARN_OCF_TO_EBITDA_HIGH = 1.3   # 営業CF/EBITDAがこれ超 → 運転資本の取り崩しの疑い
@@ -69,11 +69,6 @@ EXCLUDED_INDUSTRIES = {
     'Major Banks', 'Regional Banks', 'Investment Banks/Brokers', 'Investment Managers',
     'Financial Conglomerates', 'Finance/Rental/Leasing', 'Financial Publishing/Services',
     'Real Estate Investment Trusts', 'Real Estate Development',
-}
-
-COLUMN_LABELS_JA = {
-    'name': '銘柄名',
-    'sector': 'セクター',
 }
 
 SECTOR_LABELS_JA = {
@@ -120,7 +115,7 @@ def fetch_data() -> pd.DataFrame:
                 'cash_f_operating_activities_fy',
                 'total_revenue_yoy_growth_fy',
                 'price_book_ratio',
-                # 警告用(FCF急増・EBITDA分母効果など)
+                # 警告用(FCF急増・EBITDA分母効果・純利益>EBITDA など)
                 'ebitda_fy',
                 'cash_f_investing_activities_fy',
                 'free_cash_flow_yoy_growth_fy',
@@ -172,7 +167,7 @@ def warning_reasons(r) -> dict:
     elif r['ocf_to_ebitda'] < WARN_OCF_TO_EBITDA_LOW:
         out['fcf'].append(f"営業CF/EBITDA {r['ocf_to_ebitda']:.2f}: 現金化不足")
 
-    # --- EBITDA-資産成長差列 ---
+    # --- 成長差列 ---
     if r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH:
         prev = (f"(前年は時価総額の{r['ebitda_prev_to_cap']:.1%})"
                 if pd.notna(r['ebitda_prev_to_cap']) else "")
@@ -364,28 +359,6 @@ def diff_with_previous(df: pd.DataFrame):
 # ---------------------------------------------------------------
 # HTML部品
 # ---------------------------------------------------------------
-def make_range_bar(pct):
-    """52週レンジ内の現在値の位置を横バーで可視化する簡易チャート。"""
-    if pd.isna(pct):
-        return ""
-    pct = max(0.0, min(100.0, float(pct)))
-    # 低位=赤寄り、高位=緑寄りのマーカー色
-    if pct >= 70:
-        color = "#5fbf6a"
-    elif pct <= 30:
-        color = "#e0605a"
-    else:
-        color = "#d8c25a"
-    return (
-        f'<span class="range-bar" title="{pct:.1f}%">'
-        f'<span class="range-bar-track">'
-        f'<span class="range-bar-marker" style="left:{pct:.1f}%; background:{color};"></span>'
-        f'</span>'
-        f'<span class="range-bar-label">{pct:.0f}%</span>'
-        f'</span>'
-    )
-
-
 def make_sparkline_svg(row, width=64, height=22):
     """
     Perf.Y / Perf.6M / Perf.3M / Perf.1M / Perf.W (パフォーマンス%) から
@@ -464,48 +437,52 @@ def make_name_cell(row):
 
 
 def mark(flag, text):
-    """極端値のとき、数値の頭に ⚠️ を付ける。"""
+    """警告があるとき、数値の頭に ⚠️ を付ける。"""
     return f"⚠️{text}" if flag else text
 
 
+def reasons_cell(items):
+    """警告文のリストを1セルにまとめる。折り返しを許可し、左寄せにする。"""
+    if not items:
+        return ""
+    body = "<br>".join(escape(t) for t in items)
+    return (f'<span style="display:block;white-space:normal;min-width:220px;'
+            f'text-align:left;font-size:0.8rem;line-height:1.5">{body}</span>')
+
+
 def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
+    """列: 銘柄名 / 株価推移 / FCFy / 理由 / 成長差 / 理由 / ROE / 理由
+    (理由列は直前の指標列に対応。列名が重複するので insert で追加する)"""
     result = pd.DataFrame(index=df.index)
 
-    result[COLUMN_LABELS_JA['name']] = df.apply(make_name_cell, axis=1)
-    result[COLUMN_LABELS_JA['sector']] = df['sector'].map(SECTOR_LABELS_JA).fillna(df['sector'])
+    def add_reason_col(items):
+        result.insert(len(result.columns), '理由', items.map(reasons_cell), allow_duplicates=True)
+
+    result['銘柄名'] = df.apply(make_name_cell, axis=1)
     result['株価推移(52週レンジ位置)'] = df.apply(make_chart_cell, axis=1)
 
-    def reasons_cell(items):
-        if not items:
-            return ""
-        body = "<br>".join(escape(t) for t in items)
-        return (f'<span style="display:block;white-space:normal;min-width:220px;'
-                f'text-align:left;font-size:0.8rem;line-height:1.5">{body}</span>')
-
-    # FCFイールドと閾値を1カラムに統合
-    result['FCFイールド'] = df.apply(
-        lambda r: mark(
-            bool(r['warn_fcf']),
-            f"{r['fcf_yield']:.2%}(閾値{r['fcf_yield_threshold']:.2%})"),
+    # ヘッダは短い略称にして列幅を狭くする(意味は凡例に記載)
+    result['FCFy'] = df.apply(
+        lambda r: mark(bool(r['warn_fcf']), f"{r['fcf_yield']:.2%}"),
         axis=1
     )
-    result['FCF警告の理由'] = df['warn_fcf'].map(reasons_cell)
+    add_reason_col(df['warn_fcf'])
 
-    # EBITDA-資産成長差(上限クリップ時は + を付ける)。EBITDA成長の極端値・資産縮小は ⚠️ のみ付け、理由は隣の列
+    # EBITDA-資産成長差(上限クリップ時は + を付ける)
     def gap_label(r):
         text = f"{r['ebitda_vs_assets_growth']:.1f}"
         if r['ebitda_vs_assets_growth_raw'] > GROWTH_GAP_CLIP:
             text += "+"
         return mark(bool(r['warn_gap']), text)
 
-    result['EBITDA-資産成長差'] = df.apply(gap_label, axis=1)
-    result['成長差警告の理由'] = df['warn_gap'].map(reasons_cell)
+    result['成長差'] = df.apply(gap_label, axis=1)
+    add_reason_col(df['warn_gap'])
 
-    result['ROE(基準8.0以上)'] = df.apply(
+    result['ROE'] = df.apply(
         lambda r: mark(r['roe_warn'], f"{r['return_on_equity']:.1f}"),
         axis=1
     )
-    result['ROE警告の理由'] = df['warn_roe'].map(reasons_cell)
+    add_reason_col(df['warn_roe'])
 
     return result
 
@@ -551,8 +528,10 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     cap_max = MARKET_CAP_MAX / 1e8
     legend = (
         f"時価総額 {cap_min:,.0f}〜{cap_max:,.0f}億円 ／ "
-        "⚠️ = 一時要因の疑いあり(足切りは行わず全て表示)。理由は各指標の右隣の「警告の理由」列 ／ "
-        "成長差の「+」= 差が100pt超で100に丸め"
+        "FCFy = FCFイールド ／ "
+        "成長差 = EBITDA成長 − 総資産成長(pt。100pt超は100に丸めて「+」) ／ "
+        f"ROE基準 {MIN_ROE:.1f}%以上 ／ "
+        "⚠️ = 一時要因の疑いあり(足切りは行わず全て表示)。理由は各指標の右隣の「理由」列"
     )
 
     return f"""<!DOCTYPE html>
@@ -641,41 +620,9 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
   table.screener-table td:has(.chart-cell) {{
     text-align: center;
   }}
-  .chart-cell .range-bar {{
-    width: auto;
-  }}
   .range-pct {{
     color: #999;
     font-size: 0.75rem;
-  }}
-  .range-bar {{
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-  }}
-  .range-bar-track {{
-    position: relative;
-    display: inline-block;
-    width: 70px;
-    height: 6px;
-    background: #2a2e38;
-    border-radius: 3px;
-    flex-shrink: 0;
-  }}
-  .range-bar-marker {{
-    position: absolute;
-    top: 50%;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    transform: translate(-50%, -50%);
-  }}
-  .range-bar-label {{
-    color: #999;
-    font-size: 0.8rem;
-    min-width: 2.5em;
-    text-align: right;
   }}
   .count {{
     margin-bottom: 12px;
