@@ -151,46 +151,55 @@ def fetch_data() -> pd.DataFrame:
 
 
 def warning_reasons(r) -> dict:
-    """⚠️の根拠を、表示列ごと(fcf / gap / roe)に短い文のリストで返す。
-    閾値は定数を参照(文中には書かない)。NaN比較はFalseなので該当しない。"""
+    """⚠️の根拠を、表示列ごと(fcf / gap / roe)に (短い語, 詳細文) のリストで返す。
+    短い語は画面表示用、詳細文はホバー(title)用。閾値は定数を参照(文中には書かない)。
+    NaN比較はFalseなので該当しない。"""
     out = {'fcf': [], 'gap': [], 'roe': []}
 
     # --- FCF列 ---
     if r['fcf_yield'] > OUTLIER_FCF_YIELD:
-        out['fcf'].append(f"FCFイールド{r['fcf_yield']:.0%}: 一時増の疑い")
+        out['fcf'].append(("一時増", f"FCFイールド{r['fcf_yield']:.0%}: 一時増の疑い"))
     if (r['free_cash_flow_yoy_growth_fy'] > SUSPECT_FCF_GROWTH
             and r['invest_to_ocf'] < SUSPECT_INVEST_TO_OCF):
-        out['fcf'].append(f"FCF{r['free_cash_flow_yoy_growth_fy']:+.0f}%×投資少"
-                          f"({r['invest_to_ocf']:.2f}): 投資抑制の疑い")
+        out['fcf'].append(("FCF急増×投資少",
+                           f"FCF{r['free_cash_flow_yoy_growth_fy']:+.0f}%×投資少"
+                           f"({r['invest_to_ocf']:.2f}): 投資抑制の疑い"))
     if r['invest_to_ocf'] < 0:
-        out['fcf'].append("投資CFプラス: 資産売却の疑い")
+        out['fcf'].append(("資産売却", "投資CFプラス: 資産売却の疑い"))
     elif r['invest_to_ocf'] < WARN_INVEST_TO_OCF:
-        out['fcf'].append(f"投資少({r['invest_to_ocf']:.2f}): 投資抑制の疑い")
+        out['fcf'].append((f"投資少({r['invest_to_ocf']:.2f})",
+                           f"投資少({r['invest_to_ocf']:.2f}): 投資抑制の疑い"))
     if r['ocf_to_ebitda'] > WARN_OCF_TO_EBITDA_HIGH:
-        out['fcf'].append(f"営業CF/EBITDA {r['ocf_to_ebitda']:.2f}: 運転資本の取崩し")
+        out['fcf'].append((f"運転資本取崩({r['ocf_to_ebitda']:.2f})",
+                           f"営業CF/EBITDA {r['ocf_to_ebitda']:.2f}: 運転資本の取崩し"))
     elif r['ocf_to_ebitda'] < WARN_OCF_TO_EBITDA_LOW:
-        out['fcf'].append(f"営業CF/EBITDA {r['ocf_to_ebitda']:.2f}: 現金化不足")
+        out['fcf'].append((f"現金化不足({r['ocf_to_ebitda']:.2f})",
+                           f"営業CF/EBITDA {r['ocf_to_ebitda']:.2f}: 現金化不足"))
 
     # --- 成長差列 ---
     if r['ebitda_yoy_growth_fy'] > OUTLIER_EBITDA_GROWTH:
-        prev = (f"(前年は時価総額の{r['ebitda_prev_to_cap']:.1%})"
-                if pd.notna(r['ebitda_prev_to_cap']) else "")
-        out['gap'].append(f"EBITDA{r['ebitda_yoy_growth_fy']:+.0f}%{prev}: 反動・分母効果の疑い")
+        has_prev = pd.notna(r['ebitda_prev_to_cap'])
+        short = f"反動増(前年{r['ebitda_prev_to_cap']:.1%})" if has_prev else "反動増"
+        prev = f"(前年は時価総額の{r['ebitda_prev_to_cap']:.1%})" if has_prev else ""
+        out['gap'].append((short,
+                           f"EBITDA{r['ebitda_yoy_growth_fy']:+.0f}%{prev}: 反動・分母効果の疑い"))
     if r['asset_shrinking']:
-        out['gap'].append("総資産縮小: 圧縮による成長の疑い")
+        out['gap'].append(("資産縮小", "総資産縮小: 圧縮による成長の疑い"))
 
     # --- ROE列 ---
     if r['return_on_equity'] > OUTLIER_ROE:
-        out['roe'].append(f"ROE{r['return_on_equity']:.0f}%: 特別利益・借入の疑い")
+        out['roe'].append(("高ROE", f"ROE{r['return_on_equity']:.0f}%: 特別利益・借入の疑い"))
         if r['net_income_fy'] > r['ebitda_fy']:
-            out['roe'].append("純利益>EBITDA: 本業外利益の疑い")
+            out['roe'].append(("純益>EBITDA", "純利益>EBITDA: 本業外利益の疑い"))
     if r['equity_thin']:
         if pd.notna(r['equity_to_cap']):
-            out['roe'].append(f"自己資本薄(時価総額の{r['equity_to_cap']:.0%}): ROE膨張の疑い")
+            out['roe'].append((f"自己資本薄({r['equity_to_cap']:.0%})",
+                               f"自己資本薄(時価総額の{r['equity_to_cap']:.0%}): ROE膨張の疑い"))
         else:
-            out['roe'].append("自己資本薄(PBR≤0): ROE膨張の疑い")
+            out['roe'].append(("自己資本薄(PBR≤0)", "自己資本薄(PBR≤0): ROE膨張の疑い"))
     if r['leverage_driven']:
-        out['roe'].append(f"高レバレッジ(ROE/ROA {r['leverage_x']:.1f}倍): 借入起因の疑い")
+        out['roe'].append((f"高レバ({r['leverage_x']:.1f}倍)",
+                           f"高レバレッジ(ROE/ROA {r['leverage_x']:.1f}倍): 借入起因の疑い"))
     return out
 
 
@@ -446,11 +455,12 @@ def mark(flag, text):
 
 
 def reasons_cell(items):
-    """警告文のリストを1セルにまとめる。折り返しを許可し、左寄せにする。"""
+    """(短い語, 詳細文) のリストを1セルにまとめる。画面には短い語を「・」区切りで出し、
+    詳細文はホバー(title)に入れる。折り返しを許可し、左寄せにする。"""
     if not items:
         return ""
-    body = "<br>".join(escape(t) for t in items)
-    full = "&#10;".join(escape(t) for t in items)  # ホバー時に全文を表示(改行は &#10;)
+    body = "・".join(f"<span>{escape(short)}</span>" for short, _ in items)
+    full = "&#10;".join(escape(detail) for _, detail in items)  # 改行は &#10;
     return f'<span class="reasons" title="{full}">{body}</span>'
 
 
@@ -539,6 +549,7 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
         "成長差 = EBITDA成長 − 総資産成長(pt。100pt超は100に丸めて「+」) ／ "
         f"ROE基準 {MIN_ROE:.1f}%以上 ／ "
         "⚠️ = 一時要因の疑いあり(足切りは行わず全て表示)。理由は各指標の右隣の「理由」列"
+        "(短い語は要点。マウスを載せると詳細)"
     )
 
     return f"""<!DOCTYPE html>
@@ -640,6 +651,9 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     text-align: left;
     font-size: 0.8rem;
     line-height: 1.5;
+  }}
+  .reasons span {{
+    white-space: nowrap;
   }}
   /* メイン表: 列幅を固定してレイアウト計算を軽くする。
      指標列は固定幅、残り(理由3列)は均等割り。画面が狭いときは横スクロール */
