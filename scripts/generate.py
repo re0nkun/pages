@@ -513,7 +513,7 @@ def to_light_table_html(df: pd.DataFrame) -> str:
     """Styler はセルごとに id/class を付けて重くなるので、行数の多いメイン表は to_html で出す。
     max_colwidth を外さないとHTMLを含む長いセルが '...' で切れる。"""
     with pd.option_context('display.max_colwidth', None):
-        return df.to_html(escape=False, index=False, classes='screener-table', border=0)
+        return df.to_html(escape=False, index=False, classes='screener-table screener-main', border=0)
 
 
 def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
@@ -626,11 +626,25 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
   .reasons {{
     display: block;
     white-space: normal;
-    min-width: 220px;
+    overflow-wrap: anywhere;
     text-align: left;
     font-size: 0.8rem;
     line-height: 1.5;
   }}
+  /* メイン表: 列幅を固定してレイアウト計算を軽くする。
+     指標列は固定幅、残り(理由3列)は均等割り。画面が狭いときは横スクロール */
+  table.screener-main {{
+    table-layout: fixed;
+    min-width: 1260px;
+  }}
+  table.screener-main th {{
+    box-sizing: border-box;
+  }}
+  table.screener-main th:nth-child(1) {{ width: 150px; }}  /* 銘柄名 */
+  table.screener-main th:nth-child(2) {{ width: 150px; }}  /* 株価推移 */
+  table.screener-main th:nth-child(3) {{ width: 95px; }}   /* FCFy */
+  table.screener-main th:nth-child(5) {{ width: 95px; }}   /* 成長差 */
+  table.screener-main th:nth-child(7) {{ width: 80px; }}   /* ROE */
   .count {{
     margin-bottom: 12px;
     font-size: 0.9rem;
