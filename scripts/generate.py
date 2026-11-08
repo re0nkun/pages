@@ -446,8 +446,7 @@ def reasons_cell(items):
     if not items:
         return ""
     body = "<br>".join(escape(t) for t in items)
-    return (f'<span style="display:block;white-space:normal;min-width:220px;'
-            f'text-align:left;font-size:0.8rem;line-height:1.5">{body}</span>')
+    return f'<span class="reasons">{body}</span>'
 
 
 def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -510,13 +509,15 @@ def build_diff_html(df, title, yield_label, with_reason=False) -> str:
     return f'<h2>{title}({len(df)}件)</h2>{table}'
 
 
+def to_light_table_html(df: pd.DataFrame) -> str:
+    """Styler はセルごとに id/class を付けて重くなるので、行数の多いメイン表は to_html で出す。
+    max_colwidth を外さないとHTMLを含む長いセルが '...' で切れる。"""
+    with pd.option_context('display.max_colwidth', None):
+        return df.to_html(escape=False, index=False, classes='screener-table', border=0)
+
+
 def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
-    table_html = (
-        result.style
-        .hide(axis="index")
-        .set_table_attributes('class="screener-table"')
-        .to_html(escape=False)
-    )
+    table_html = to_light_table_html(result)
 
     diff_html = (
         build_diff_html(dropped, '本日の脱落銘柄(前日比)', '前日FCFイールド', with_reason=True)
@@ -612,17 +613,23 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     margin: 0 auto;
   }}
   .chart-cell {{
-    display: inline-flex;
+    display: flex;
     flex-direction: row;
     align-items: center;
+    justify-content: center;
     gap: 6px;
-  }}
-  table.screener-table td:has(.chart-cell) {{
-    text-align: center;
   }}
   .range-pct {{
     color: #999;
     font-size: 0.75rem;
+  }}
+  .reasons {{
+    display: block;
+    white-space: normal;
+    min-width: 220px;
+    text-align: left;
+    font-size: 0.8rem;
+    line-height: 1.5;
   }}
   .count {{
     margin-bottom: 12px;
