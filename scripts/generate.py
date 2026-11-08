@@ -43,6 +43,10 @@ OUTLIER_EBITDA_GROWTH = 100  # %
 OUTLIER_FCF_YIELD = 0.20     # 比率(20%)
 OUTLIER_ROE = 40             # %
 GROWTH_GAP_CLIP = 100        # EBITDA-資産成長差の表示上限
+# 表示: 行の高さを固定するため、理由セルは最大この行数まで表示(全文はホバーのtitleに入れる)
+REASON_MAX_LINES = 2
+REASON_LINE_PX = 19.2        # 0.8rem × line-height 1.5 = 19.2px
+ROW_HEIGHT_PX = round(REASON_MAX_LINES * REASON_LINE_PX + 16)  # + 上下padding(12px)と罫線(2px)に余裕2px
 # 自己資本まわりの警告(除外せず表示のみ。閾値は仮置き)
 THIN_EQUITY_TO_CAP = 0.10    # 推定自己資本/時価総額(=1/PBR)がこれ未満 → ROEの分母が小さい
 HIGH_LEVERAGE_X = 4.0        # ROE/ROA(=総資産/自己資本の目安)がこれ超
@@ -446,11 +450,12 @@ def reasons_cell(items):
     if not items:
         return ""
     body = "<br>".join(escape(t) for t in items)
-    return f'<span class="reasons">{body}</span>'
+    full = "&#10;".join(escape(t) for t in items)  # ホバー時に全文を表示(改行は &#10;)
+    return f'<span class="reasons" title="{full}">{body}</span>'
 
 
 def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
-    """列: 銘柄名 / 株価推移 / FCFy / 理由 / 成長差 / 理由 / ROE / 理由
+    """列: 銘柄名 / 株価推移(52週レンジ位置を%で併記) / FCFy / 理由 / 成長差 / 理由 / ROE / 理由
     (理由列は直前の指標列に対応。列名が重複するので insert で追加する)"""
     result = pd.DataFrame(index=df.index)
 
@@ -458,7 +463,7 @@ def build_result_table(df: pd.DataFrame) -> pd.DataFrame:
         result.insert(len(result.columns), '理由', items.map(reasons_cell), allow_duplicates=True)
 
     result['銘柄名'] = df.apply(make_name_cell, axis=1)
-    result['株価推移(52週レンジ位置)'] = df.apply(make_chart_cell, axis=1)
+    result['株価推移'] = df.apply(make_chart_cell, axis=1)
 
     # ヘッダは短い略称にして列幅を狭くする(意味は凡例に記載)
     result['FCFy'] = df.apply(
@@ -529,6 +534,7 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     cap_max = MARKET_CAP_MAX / 1e8
     legend = (
         f"時価総額 {cap_min:,.0f}〜{cap_max:,.0f}億円 ／ "
+        "株価推移の(%) = 52週レンジ内の位置 ／ "
         "FCFy = FCFイールド ／ "
         "成長差 = EBITDA成長 − 総資産成長(pt。100pt超は100に丸めて「+」) ／ "
         f"ROE基準 {MIN_ROE:.1f}%以上 ／ "
@@ -624,7 +630,11 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
     font-size: 0.75rem;
   }}
   .reasons {{
-    display: block;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: {REASON_MAX_LINES};
+    line-clamp: {REASON_MAX_LINES};
+    overflow: hidden;
     white-space: normal;
     overflow-wrap: anywhere;
     text-align: left;
@@ -639,6 +649,14 @@ def render_html(result: pd.DataFrame, dropped=None, added=None) -> str:
   }}
   table.screener-main th {{
     box-sizing: border-box;
+  }}
+  table.screener-main th:nth-child(4),
+  table.screener-main th:nth-child(6),
+  table.screener-main th:nth-child(8) {{ text-align: left; }}  /* 理由 */
+  table.screener-main td {{
+    box-sizing: border-box;
+    height: {ROW_HEIGHT_PX}px;  /* 行の高さを固定(paddingと罫線を含む) */
+    vertical-align: middle;
   }}
   table.screener-main th:nth-child(1) {{ width: 150px; }}  /* 銘柄名 */
   table.screener-main th:nth-child(2) {{ width: 150px; }}  /* 株価推移 */
